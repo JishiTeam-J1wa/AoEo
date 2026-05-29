@@ -1,4 +1,4 @@
-package aoeo
+package core
 
 import "time"
 
@@ -54,28 +54,43 @@ type Choice struct {
 	FinishReason string  `json:"finish_reason"`
 }
 
-// ProviderConfig holds the configuration for a single AI provider.
-type ProviderConfig struct {
-	Name          string  `json:"name"`
-	APIKey        string  `json:"apiKey"`
-	Endpoint      string  `json:"endpoint"`
-	Model         string  `json:"model"`
-	MaxConcurrent int     `json:"maxConcurrent"`
-	SkipTLSVerify bool    `json:"skipTLSVerify"`
-	Pricing       Pricing `json:"pricing"` // Optional; falls back to DefaultPricing
-}
-
-// Config holds the full configuration including all providers and mode.
-type Config struct {
-	Providers    []ProviderConfig `json:"providers"`
-	AuditEnabled bool             `json:"auditEnabled"`
-}
-
 // ProviderStatus represents the runtime status of a provider.
 type ProviderStatus struct {
 	Name      string `json:"name"`
 	Available bool   `json:"available"`
 	Model     string `json:"model"`
+}
+
+// StreamChunk represents a single chunk from an SSE stream.
+type StreamChunk struct {
+	Index        int     `json:"index"`
+	Delta        Message `json:"delta"`
+	FinishReason string  `json:"finish_reason,omitempty"`
+}
+
+// StreamCompletionResponse is yielded for each chunk during streaming.
+type StreamCompletionResponse struct {
+	ID    string      `json:"id"`
+	Model string      `json:"model"`
+	Chunk StreamChunk `json:"chunk"`
+	// Err is set when the stream encounters a non-EOF error.
+	// When Err is non-nil, the channel will be closed immediately after.
+	Err error `json:"-"`
+}
+
+// DualResult holds results from dual-provider completion.
+type DualResult struct {
+	Result1   *ChatCompletionResponse `json:"result1"`
+	Result2   *ChatCompletionResponse `json:"result2"`
+	Consensus bool                    `json:"consensus"`
+}
+
+// AuditResult holds the outcome of an audit pass.
+type AuditResult struct {
+	Primary   *ChatCompletionResponse `json:"primary"`
+	Audit     *ChatCompletionResponse `json:"audit"`
+	Consensus bool                    `json:"consensus"`
+	Adjusted  *ChatCompletionResponse `json:"adjusted"`
 }
 
 // Clone creates a deep copy of the request, including Messages.

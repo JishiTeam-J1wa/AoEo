@@ -1,23 +1,18 @@
-package aoeo
+package engine
 
 import (
 	"context"
 	"fmt"
-)
 
-// AuditResult holds the outcome of an audit pass.
-type AuditResult struct {
-	Primary   *ChatCompletionResponse `json:"primary"`
-	Audit     *ChatCompletionResponse `json:"audit"`
-	Consensus bool                    `json:"consensus"`
-	Adjusted  *ChatCompletionResponse `json:"adjusted"`
-}
+	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/providers"
+)
 
 // Audit performs a secondary completion using a different provider and compares results.
 // It requires at least 2 available providers in the scheduler.
-func (c *Client) Audit(ctx context.Context, req ChatCompletionRequest) (*AuditResult, error) {
+func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (*core.AuditResult, error) {
 	// Identify primary provider explicitly so we can compare by name later.
-	available := c.scheduler.availableProviders()
+	available := s.AvailableProviders()
 	if len(available) == 0 {
 		return nil, fmt.Errorf("no available provider")
 	}
@@ -31,63 +26,63 @@ func (c *Client) Audit(ctx context.Context, req ChatCompletionRequest) (*AuditRe
 		reqCopy.Model = primaryProvider.Config().Model
 	}
 
-	auditCtx, cancel := context.WithTimeout(ctx, c.scheduler.timeout)
+	auditCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	// Get primary result.
-	if err := c.scheduler.sem.acquire(auditCtx); err != nil {
+	if err := s.sem.Acquire(auditCtx); err != nil {
 		return nil, err
 	}
-	primary, err := func() (result *ChatCompletionResponse, err error) {
+	primary, err := func() (result *core.ChatCompletionResponse, err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				GetLogger().Error("audit primary panic recovered", "panic", r)
+				core.GetLogger().Error("audit primary panic recovered", "panic", r)
 				err = fmt.Errorf("primary provider panic: %v", r)
 			}
 		}()
 		result, err = primaryProvider.ChatComplete(auditCtx, reqCopy)
 		return
 	}()
-	c.scheduler.sem.release()
+	s.sem.Release()
 	if err != nil {
 		return nil, fmt.Errorf("primary completion failed: %w", err)
 	}
 
 	// Get audit result from a different provider.
-	var auditProvider Provider
+	var auditProvider providers.Provider
 	for attempt := 0; attempt < len(available)*2 && auditProvider == nil; attempt++ {
-		candidate := c.scheduler.PickProviderRoundRobin()
+		candidate := s.PickProviderRoundRobin()
 		if candidate != nil && candidate.Name() != primaryProvider.Name() {
 			auditProvider = candidate
 		}
 	}
 
-	var auditResp *ChatCompletionResponse
+	var auditResp *core.ChatCompletionResponse
 	if auditProvider != nil {
 		auditReqCopy := req.Clone()
 		if auditReqCopy.Model == "" {
 			auditReqCopy.Model = auditProvider.Config().Model
 		}
-		if err := c.scheduler.sem.acquire(auditCtx); err != nil {
+		if err := s.sem.Acquire(auditCtx); err != nil {
 			return nil, err
 		}
-		auditResp, err = func() (result *ChatCompletionResponse, err error) {
+		auditResp, err = func() (result *core.ChatCompletionResponse, err error) {
 			defer func() {
 				if r := recover(); r != nil {
-					GetLogger().Error("audit secondary panic recovered", "panic", r)
+					core.GetLogger().Error("audit secondary panic recovered", "panic", r)
 					err = fmt.Errorf("audit provider panic: %v", r)
 				}
 			}()
 			result, err = auditProvider.ChatComplete(auditCtx, auditReqCopy)
 			return
 		}()
-		c.scheduler.sem.release()
+		s.sem.Release()
 		if err != nil {
-			GetLogger().Warn("audit completion failed", "error", err)
+			core.GetLogger().Warn("audit completion failed", "error", err)
 		}
 	}
 
-	result := &AuditResult{
+	result := &core.AuditResult{
 		Primary: primary,
 		Audit:   auditResp,
 	}
@@ -96,9 +91,9 @@ func (c *Client) Audit(ctx context.Context, req ChatCompletionRequest) (*AuditRe
 		result.Consensus = Consensus(primary, auditResp)
 		result.Adjusted = MergeChoices(primary, auditResp, result.Consensus)
 		if !result.Consensus {
-			c.emit(EventAuditDisagree, fmt.Sprintf(
-				"audit disagreement: primary=%s vs audit=%s", primary.Model, auditResp.Model,
-			))
+			core.GetLogger().Warn("audit disagreement",
+				"primary", primary.Model,
+				"audit", auditResp.Model)
 		}
 	} else {
 		result.Adjusted = primary

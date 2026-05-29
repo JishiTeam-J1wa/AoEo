@@ -1,4 +1,4 @@
-package aoeo
+package core
 
 import (
 	"log/slog"

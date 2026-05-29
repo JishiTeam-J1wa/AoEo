@@ -1,4 +1,4 @@
-package aoeo
+package engine
 
 import (
 	"context"
@@ -23,17 +23,17 @@ type adaptiveSemaphore struct {
 	waiters []waiter
 }
 
-func newAdaptiveSemaphore(maxConc int) *adaptiveSemaphore {
+func NewAdaptiveSemaphore(maxConc int) *adaptiveSemaphore {
 	a := &adaptiveSemaphore{}
 	a.maxConc.Store(int32(maxConc))
 	return a
 }
 
-func (a *adaptiveSemaphore) acquire(ctx context.Context) error {
-	return a.acquireN(ctx, 1)
+func (a *adaptiveSemaphore) Acquire(ctx context.Context) error {
+	return a.AcquireN(ctx, 1)
 }
 
-func (a *adaptiveSemaphore) acquireN(ctx context.Context, n int) error {
+func (a *adaptiveSemaphore) AcquireN(ctx context.Context, n int) error {
 	// Fast path: try atomic CAS to avoid locking.
 	for {
 		current := a.inUse.Load()
@@ -76,11 +76,11 @@ func (a *adaptiveSemaphore) acquireN(ctx context.Context, n int) error {
 	}
 }
 
-func (a *adaptiveSemaphore) release() {
-	a.releaseN(1)
+func (a *adaptiveSemaphore) Release() {
+	a.ReleaseN(1)
 }
 
-func (a *adaptiveSemaphore) releaseN(n int) {
+func (a *adaptiveSemaphore) ReleaseN(n int) {
 	a.inUse.Add(-int32(n))
 
 	a.mu.Lock()

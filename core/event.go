@@ -1,4 +1,4 @@
-package aoeo
+package core
 
 // EventEmitter is an optional interface for receiving scheduler events.
 // Implementations can be attached to a Client to receive progress notifications.

@@ -4,60 +4,143 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/internal/engine"
+	"github.com/JishiTeam-J1wa/AoEo/providers"
+)
+
+// Type aliases for backward compatibility.
+type (
+	ChatCompletionRequest      = core.ChatCompletionRequest
+	ChatCompletionResponse     = core.ChatCompletionResponse
+	Message                    = core.Message
+	Choice                     = core.Choice
+	Usage                      = core.Usage
+	ModelInfo                  = core.ModelInfo
+	ResponseFormat             = core.ResponseFormat
+	StreamChunk                = core.StreamChunk
+	StreamCompletionResponse   = core.StreamCompletionResponse
+	DualResult                 = core.DualResult
+	AuditResult                = core.AuditResult
+	ProviderStatus             = core.ProviderStatus
+	Pricing                    = core.Pricing
+	Config                     = core.Config
+	ProviderConfig             = core.ProviderConfig
+	RetryConfig                = core.RetryConfig
+	EventEmitter               = core.EventEmitter
+	NopEmitter                 = core.NopEmitter
+	Logger                     = core.Logger
+	CallRecord                 = engine.CallRecord
+	ProviderStats              = engine.ProviderStats
+	History                    = engine.History
+	PromptTemplate             = engine.PromptTemplate
+	PromptInjector             = engine.PromptInjector
+	Scheduler                  = engine.Scheduler
+	SchedulerOption            = engine.SchedulerOption
+	Provider                   = providers.Provider
+)
+
+// Convenience re-exports.
+var (
+	NewHistory           = engine.NewHistory
+	NewPromptInjector    = engine.NewPromptInjector
+	SetLogger            = core.SetLogger
+	GetLogger            = core.GetLogger
+	DefaultPricing       = core.DefaultPricing
+	DefaultRetryConfig   = core.DefaultRetryConfig
+	IsRetryableError     = core.IsRetryableError
+	ValidateConfig       = core.ValidateConfig
+	ExtractJSON          = engine.ExtractJSON
+	ExtractField         = engine.ExtractField
+	MergeChoices         = engine.MergeChoices
+	Consensus            = engine.Consensus
+	ParseSSE             = engine.ParseSSE
+	CreateProvider       = engine.CreateProvider
+	NewScheduler         = engine.NewScheduler
+	NewSchedulerWithOptions = engine.NewSchedulerWithOptions
+	NewDeepSeekProvider  = providers.NewDeepSeekProvider
+	NewKimiProvider      = providers.NewKimiProvider
+	NewGLMProvider       = providers.NewGLMProvider
+	NewQwenProvider      = providers.NewQwenProvider
+	NewOpenAIProvider    = providers.NewOpenAIProvider
+	NewBaseProvider      = providers.NewBaseProvider
+)
+
+// WithXxx options re-exported from engine.
+var (
+	WithTimeout              = engine.WithTimeout
+	WithHistory              = engine.WithHistory
+	WithRetry                = engine.WithRetry
+	WithPromptInjector       = engine.WithPromptInjector
+	InjectPrompts            = engine.InjectPrompts
+	WithSystemPromptInjector = engine.WithSystemPromptInjector
+)
+
+// Event constants re-exported.
+const (
+	EventProviderFail    = core.EventProviderFail
+	EventProviderOpen    = core.EventProviderOpen
+	EventProviderRecover = core.EventProviderRecover
+	EventFallbackTrigger = core.EventFallbackTrigger
+	EventAuditDisagree   = core.EventAuditDisagree
 )
 
 // Client is the high-level entry point for AoEo.
-// It wraps a Scheduler with a fluent API and optional event emission.
 type Client struct {
-	scheduler *Scheduler
+	scheduler *engine.Scheduler
 	emitterMu sync.RWMutex
-	emitter   EventEmitter
+	emitter   core.EventEmitter
 }
 
 // NewClient creates a new AoEo client from a configuration.
-func NewClient(cfg Config, opts ...SchedulerOption) (*Client, error) {
+func NewClient(cfg core.Config, opts ...engine.SchedulerOption) (*Client, error) {
 	if issues := cfg.Validate(); len(issues) > 0 {
 		return nil, fmt.Errorf("config validation failed: %v", issues)
 	}
-	s := NewSchedulerWithOptions(nil, opts...)
+	s := engine.NewSchedulerWithOptions(nil, opts...)
 	if err := s.ApplyConfig(cfg); err != nil {
 		return nil, fmt.Errorf("apply config: %w", err)
 	}
 	return &Client{
 		scheduler: s,
-		emitter:   NopEmitter{},
+		emitter:   core.NopEmitter{},
 	}, nil
 }
 
 // NewClientWithProviders creates a client directly from provider instances.
-func NewClientWithProviders(providers ...Provider) *Client {
+func NewClientWithProviders(provs ...providers.Provider) *Client {
 	return &Client{
-		scheduler: NewScheduler(providers...),
-		emitter:   NopEmitter{},
+		scheduler: engine.NewScheduler(provs...),
+		emitter:   core.NopEmitter{},
 	}
 }
 
 // History returns the attached history recorder (may be nil).
-func (c *Client) History() *History {
-	return c.scheduler.history
+func (c *Client) History() *engine.History {
+	return c.scheduler.History()
 }
 
 // Stats returns aggregate statistics from history.
-func (c *Client) Stats() map[string]ProviderStats {
-	if c.scheduler.history == nil {
+func (c *Client) Stats() map[string]engine.ProviderStats {
+	if c.scheduler.History() == nil {
 		return nil
 	}
-	return c.scheduler.history.Stats()
+	return c.scheduler.History().Stats()
 }
 
 // SetEmitter attaches an event emitter to the client.
-func (c *Client) SetEmitter(emitter EventEmitter) {
+func (c *Client) SetEmitter(emitter core.EventEmitter) {
 	c.emitterMu.Lock()
 	defer c.emitterMu.Unlock()
 	if emitter == nil {
-		c.emitter = NopEmitter{}
+		c.emitter = core.NopEmitter{}
 	} else {
 		c.emitter = emitter
+	}
+	// Propagate to providers.
+	for _, p := range c.scheduler.AvailableProviders() {
+		p.SetEmitter(emitter)
 	}
 }
 
@@ -69,20 +152,20 @@ func (c *Client) emit(topic string, data ...any) {
 }
 
 // ChatComplete performs a single chat completion using the primary provider.
-func (c *Client) ChatComplete(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
+func (c *Client) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
 	return c.scheduler.ChatComplete(ctx, req)
 }
 
 // ChatCompleteWithFallback tries primary provider first, then falls back.
-func (c *Client) ChatCompleteWithFallback(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	available := c.scheduler.availableProviders()
+func (c *Client) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
+	available := c.scheduler.AvailableProviders()
 	if len(available) > 0 {
 		primary := available[0]
 		resp, err := c.scheduler.ChatCompleteWithFallback(ctx, req)
 		if err != nil {
-			c.emit(EventFallbackTrigger, fmt.Sprintf("all providers failed, primary %s: %v", primary.Name(), err))
+			c.emit(core.EventFallbackTrigger, fmt.Sprintf("all providers failed, primary %s: %v", primary.Name(), err))
 		} else if resp != nil && primary.Name() != resp.Model && len(available) > 1 {
-			c.emit(EventFallbackTrigger, fmt.Sprintf("fallback activated: %s -> %s", primary.Name(), resp.Model))
+			c.emit(core.EventFallbackTrigger, fmt.Sprintf("fallback activated: %s -> %s", primary.Name(), resp.Model))
 		}
 		return resp, err
 	}
@@ -90,17 +173,17 @@ func (c *Client) ChatCompleteWithFallback(ctx context.Context, req ChatCompletio
 }
 
 // ChatCompleteDual sends the request to two different providers concurrently.
-func (c *Client) ChatCompleteDual(ctx context.Context, req ChatCompletionRequest) (*DualResult, error) {
+func (c *Client) ChatCompleteDual(ctx context.Context, req core.ChatCompletionRequest) (*core.DualResult, error) {
 	return c.scheduler.ChatCompleteDual(ctx, req)
 }
 
 // ChatCompleteStream performs a streaming chat completion.
-func (c *Client) ChatCompleteStream(ctx context.Context, req ChatCompletionRequest) (<-chan StreamCompletionResponse, error) {
+func (c *Client) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
 	return c.scheduler.ChatCompleteStream(ctx, req)
 }
 
 // ListModels returns available models for the named provider.
-func (c *Client) ListModels(ctx context.Context, providerName string) ([]ModelInfo, error) {
+func (c *Client) ListModels(ctx context.Context, providerName string) ([]core.ModelInfo, error) {
 	return c.scheduler.ListModels(ctx, providerName)
 }
 
@@ -110,26 +193,31 @@ func (c *Client) TestProvider(ctx context.Context, providerName string) error {
 }
 
 // ProviderStatus returns the current status of all providers.
-func (c *Client) ProviderStatus() []ProviderStatus {
+func (c *Client) ProviderStatus() []core.ProviderStatus {
 	return c.scheduler.ProviderStatus()
 }
 
 // PromptInjector returns the attached prompt injector (may be nil).
-func (c *Client) PromptInjector() *PromptInjector {
-	return c.scheduler.promptInjector
+func (c *Client) PromptInjector() *engine.PromptInjector {
+	return c.scheduler.PromptInjector()
 }
 
 // SetPromptInjector attaches a prompt injector to the client.
-func (c *Client) SetPromptInjector(pi *PromptInjector) {
-	c.scheduler.promptInjector = pi
+func (c *Client) SetPromptInjector(pi *engine.PromptInjector) {
+	c.scheduler.SetPromptInjector(pi)
 }
 
-// Close gracefully shuts down the client, waiting for in-flight requests to complete.
+// Close gracefully shuts down the client.
 func (c *Client) Close() error {
 	return c.scheduler.Close()
 }
 
 // Scheduler returns the underlying scheduler for advanced use.
-func (c *Client) Scheduler() *Scheduler {
+func (c *Client) Scheduler() *engine.Scheduler {
 	return c.scheduler
+}
+
+// Audit performs a secondary completion using a different provider and compares results.
+func (c *Client) Audit(ctx context.Context, req core.ChatCompletionRequest) (*core.AuditResult, error) {
+	return c.scheduler.Audit(ctx, req)
 }

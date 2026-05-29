@@ -1,10 +1,27 @@
-package aoeo
+package core
 
 import (
 	"fmt"
 	"net/url"
 	"strings"
 )
+
+// ProviderConfig holds the configuration for a single AI provider.
+type ProviderConfig struct {
+	Name          string  `json:"name"`
+	APIKey        string  `json:"apiKey"`
+	Endpoint      string  `json:"endpoint"`
+	Model         string  `json:"model"`
+	MaxConcurrent int     `json:"maxConcurrent"`
+	SkipTLSVerify bool    `json:"skipTLSVerify"`
+	Pricing       Pricing `json:"pricing"` // Optional; falls back to DefaultPricing
+}
+
+// Config holds the full configuration including all providers and mode.
+type Config struct {
+	Providers    []ProviderConfig `json:"providers"`
+	AuditEnabled bool             `json:"auditEnabled"`
+}
 
 // ValidateConfig checks a ProviderConfig for common misconfigurations.
 // Returns a slice of error messages; empty slice means valid.

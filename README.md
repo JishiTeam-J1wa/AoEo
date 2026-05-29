@@ -249,32 +249,39 @@ client.SetEmitter(&MyEmitter{})
 
 ```
 AoEo/
-├── client.go          # 用户入口，fluent API
-├── scheduler.go       # 核心调度：路由、限流、注入、记录
-├── providers.go       # Provider 接口 + BaseProvider + 全部内置 Provider
-├── types.go           # 统一请求/响应类型
+├── client.go          # 用户入口，fluent API + 类型别名
 ├── options.go         # 请求构建器
-├── config.go          # 配置验证
-├── history.go         # 调用历史 + 成本计算 + 统计聚合
-├── prompt.go          # Prompt 模板注入引擎
-├── retry.go           # 指数退避重试
-├── stream.go          # SSE 流式支持
-├── audit.go           # 审计模式
-├── event.go           # 事件系统
-├── logger.go          # 结构化日志
-├── result.go          # 结果处理 + JSON 提取 + 多结果合并
-├── semaphore.go       # 自适应并发限流
-├── aoeo_test.go       # 32 个单元测试（含 Race Detector）
-├── README.md          # 本文档
-├── DESIGN.md          # 架构设计文档
-├── INTEGRATION.md     # 系统集成指南
-├── AUDIT_REPORT.md    # 审计报告
+├── go.mod
+├── core/              # 公共类型和工具
+│   ├── types.go       # 统一请求/响应类型
+│   ├── config.go      # 配置验证
+│   ├── pricing.go     # 价格模型 + 成本计算
+│   ├── retry.go       # 重试配置
+│   ├── event.go       # 事件系统
+│   └── logger.go      # 结构化日志
+├── providers/         # Provider 接口和实现
+│   └── providers.go   # Provider 接口 + BaseProvider + OpenAI + 内置 Provider
+├── internal/          # 内部实现
+│   └── engine/
+│       ├── scheduler.go   # 调度核心 + 选项
+│       ├── history.go     # 调用历史 + 统计聚合
+│       ├── prompt.go      # Prompt 注入引擎
+│       ├── stream.go      # SSE 流式支持
+│       ├── audit.go       # 审计模式
+│       ├── result.go      # 结果处理 + JSON 提取
+│       ├── semaphore.go   # 自适应并发限流
+│       └── retry_impl.go  # 指数退避重试实现
+├── examples/
+│   ├── basic/
+│   ├── multi_provider/
+│   ├── streaming/
+│   └── list_models/
+├── README.md
+├── DESIGN.md
+├── INTEGRATION.md
+├── AUDIT_REPORT.md
 ├── LICENSE
-└── examples/          # 示例代码
-    ├── basic/
-    ├── multi_provider/
-    ├── streaming/
-    └── list_models/
+└── aoeo_test.go       # 32 个单元测试（含 Race Detector）
 ```
 
 ---

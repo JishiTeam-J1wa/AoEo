@@ -1,4 +1,4 @@
-package aoeo
+package engine
 
 import (
 	"encoding/json"
@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/JishiTeam-J1wa/AoEo/core"
 )
 
 var (
@@ -18,13 +20,11 @@ var (
 // 2. Markdown code fence extraction
 // 3. First JSON object in text
 func ExtractJSON(content string, v any) error {
-	// Strategy 1: Direct parse.
 	trimmed := strings.TrimSpace(content)
 	if err := json.Unmarshal([]byte(trimmed), v); err == nil {
 		return nil
 	}
 
-	// Strategy 2: Markdown fence.
 	matches := reMarkdownFence.FindStringSubmatch(content)
 	if len(matches) >= 2 {
 		trimmed := strings.TrimSpace(matches[1])
@@ -33,7 +33,6 @@ func ExtractJSON(content string, v any) error {
 		}
 	}
 
-	// Strategy 3: Find first JSON object.
 	jsonStr := findFirstJSONObject(content)
 	if jsonStr != "" {
 		if err := json.Unmarshal([]byte(jsonStr), v); err == nil {
@@ -44,7 +43,6 @@ func ExtractJSON(content string, v any) error {
 	return fmt.Errorf("failed to extract JSON from content")
 }
 
-// findFirstJSONObject finds the first { ... } block, handling nested braces.
 func findFirstJSONObject(content string) string {
 	start := strings.Index(content, "{")
 	if start < 0 {
@@ -100,17 +98,9 @@ func ExtractField(content, fieldName string) string {
 	}
 	return ""
 }
-// DualResult holds results from dual-provider completion.
-type DualResult struct {
-	Result1   *ChatCompletionResponse `json:"result1"`
-	Result2   *ChatCompletionResponse `json:"result2"`
-	Consensus bool                    `json:"consensus"`
-}
 
 // MergeChoices concatenates the content from two completion responses.
-// If consensus is true, it returns the first response with averaged usage.
-// If consensus is false, it returns both responses combined with a disagreement marker.
-func MergeChoices(r1, r2 *ChatCompletionResponse, consensus bool) *ChatCompletionResponse {
+func MergeChoices(r1, r2 *core.ChatCompletionResponse, consensus bool) *core.ChatCompletionResponse {
 	if r1 == nil && r2 == nil {
 		return nil
 	}
@@ -121,10 +111,10 @@ func MergeChoices(r1, r2 *ChatCompletionResponse, consensus bool) *ChatCompletio
 		return r1
 	}
 
-	merged := &ChatCompletionResponse{
+	merged := &core.ChatCompletionResponse{
 		ID:    r1.ID,
 		Model: r1.Model,
-		Usage: Usage{
+		Usage: core.Usage{
 			PromptTokens:     r1.Usage.PromptTokens + r2.Usage.PromptTokens,
 			CompletionTokens: r1.Usage.CompletionTokens + r2.Usage.CompletionTokens,
 			TotalTokens:      r1.Usage.TotalTokens + r2.Usage.TotalTokens,
@@ -136,14 +126,13 @@ func MergeChoices(r1, r2 *ChatCompletionResponse, consensus bool) *ChatCompletio
 		return merged
 	}
 
-	// Disagreement: combine both outputs.
 	content1 := extractContent(r1)
 	content2 := extractContent(r2)
 	combined := fmt.Sprintf("[Provider 1]\n%s\n\n[Provider 2]\n%s", content1, content2)
 
-	merged.Choices = []Choice{{
+	merged.Choices = []core.Choice{{
 		Index: 0,
-		Message: Message{
+		Message: core.Message{
 			Role:    "assistant",
 			Content: combined,
 		},
@@ -153,23 +142,20 @@ func MergeChoices(r1, r2 *ChatCompletionResponse, consensus bool) *ChatCompletio
 }
 
 // Consensus checks if two responses have the same content.
-// It normalizes whitespace and ignores case to provide a practical match
-// for natural-language outputs from different models.
-func Consensus(r1, r2 *ChatCompletionResponse) bool {
+func Consensus(r1, r2 *core.ChatCompletionResponse) bool {
 	if r1 == nil || r2 == nil {
 		return false
 	}
 	return normalizeContent(extractContent(r1)) == normalizeContent(extractContent(r2))
 }
 
-// normalizeContent collapses whitespace and lowercases text for comparison.
 func normalizeContent(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	fields := strings.Fields(s)
 	return strings.Join(fields, " ")
 }
 
-func extractContent(r *ChatCompletionResponse) string {
+func extractContent(r *core.ChatCompletionResponse) string {
 	if r == nil || len(r.Choices) == 0 {
 		return ""
 	}

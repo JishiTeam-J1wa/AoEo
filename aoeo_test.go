@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/internal/engine"
 )
 
 // mockProvider is a test double that implements the Provider interface.
@@ -40,6 +43,8 @@ func (m *mockProvider) IsAvailable() bool { return m.available }
 func (m *mockProvider) ListModels(_ context.Context) ([]ModelInfo, error) {
 	return []ModelInfo{{ID: "mock-model", OwnedBy: "test"}}, nil
 }
+
+func (m *mockProvider) SetEmitter(_ core.EventEmitter) {}
 
 func (m *mockProvider) Config() ProviderConfig { return m.config }
 
@@ -100,7 +105,7 @@ func TestCircuitBreaker(t *testing.T) {
 	}
 
 	// Wait for cooldown
-	bp.failUntil = time.Now().Add(-1 * time.Second)
+	bp.SetFailUntil(time.Now().Add(-1 * time.Second))
 	if !bp.IsAvailable() {
 		t.Fatal("expected available after cooldown")
 	}
@@ -383,18 +388,18 @@ func TestDefaultPricing(t *testing.T) {
 }
 
 func TestAdaptiveSemaphore_ContextCancel(t *testing.T) {
-	sem := newAdaptiveSemaphore(1)
-	sem.acquire(context.Background()) // occupy the only slot
+	sem := engine.NewAdaptiveSemaphore(1)
+	sem.Acquire(context.Background()) // occupy the only slot
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go cancel() // cancel immediately
 
-	err := sem.acquire(ctx)
+	err := sem.Acquire(ctx)
 	if err != context.Canceled {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 
-	sem.release() // should not panic
+	sem.Release() // should not panic
 }
 
 func TestRetry_DoRetry(t *testing.T) {
@@ -412,7 +417,7 @@ func TestRetry_DoRetry(t *testing.T) {
 		Retryable:  func(err error) bool { return true },
 	}
 
-	err := doRetry(context.Background(), cfg, fn)
+	err := engine.DoRetry(context.Background(), cfg, fn)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -435,7 +440,7 @@ func TestRetry_DoRetry_ContextCancel(t *testing.T) {
 		BaseDelay:  10 * time.Millisecond,
 		Retryable:  func(err error) bool { return true },
 	}
-	err := doRetry(ctx, cfg, func() error { return errors.New("fail") })
+	err := engine.DoRetry(ctx, cfg, func() error { return errors.New("fail") })
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}

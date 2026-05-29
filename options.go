@@ -1,55 +1,54 @@
 package aoeo
 
+import "github.com/JishiTeam-J1wa/AoEo/core"
+
 // Option is a functional option for configuring chat completion requests.
-type Option func(*ChatCompletionRequest)
+type Option func(*core.ChatCompletionRequest)
 
 // WithSystemPrompt sets or replaces the system prompt for the request.
-// If a system message already exists, it is replaced; otherwise one is prepended.
 func WithSystemPrompt(prompt string) Option {
-	return func(req *ChatCompletionRequest) {
-		// Find existing system message.
+	return func(req *core.ChatCompletionRequest) {
 		for i := range req.Messages {
 			if req.Messages[i].Role == "system" {
 				req.Messages[i].Content = prompt
 				return
 			}
 		}
-		// Prepend a new system message.
-		req.Messages = append([]Message{{Role: "system", Content: prompt}}, req.Messages...)
+		req.Messages = append([]core.Message{{Role: "system", Content: prompt}}, req.Messages...)
 	}
 }
 
 // WithTemperature sets the sampling temperature.
 func WithTemperature(t float32) Option {
-	return func(req *ChatCompletionRequest) {
+	return func(req *core.ChatCompletionRequest) {
 		req.Temperature = t
 	}
 }
 
 // WithMaxTokens sets the maximum number of tokens to generate.
 func WithMaxTokens(n int) Option {
-	return func(req *ChatCompletionRequest) {
+	return func(req *core.ChatCompletionRequest) {
 		req.MaxTokens = n
 	}
 }
 
 // WithJSONResponse requests JSON output format.
 func WithJSONResponse() Option {
-	return func(req *ChatCompletionRequest) {
-		req.ResponseFormat = ResponseFormat{Type: "json_object"}
+	return func(req *core.ChatCompletionRequest) {
+		req.ResponseFormat = core.ResponseFormat{Type: "json_object"}
 	}
 }
 
 // WithModel sets the target model for the request.
 func WithModel(model string) Option {
-	return func(req *ChatCompletionRequest) {
+	return func(req *core.ChatCompletionRequest) {
 		req.Model = model
 	}
 }
 
 // BuildRequest creates a ChatCompletionRequest from messages and options.
-func BuildRequest(messages []Message, opts ...Option) ChatCompletionRequest {
-	req := ChatCompletionRequest{
+func BuildRequest(messages []core.Message, opts ...Option) core.ChatCompletionRequest {
+	req := core.ChatCompletionRequest{
 		Messages: messages,
 	}
 	for _, opt := range opts {

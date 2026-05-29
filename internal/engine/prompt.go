@@ -1,8 +1,10 @@
-package aoeo
+package engine
 
 import (
 	"strings"
 	"sync"
+
+	"github.com/JishiTeam-J1wa/AoEo/core"
 )
 
 // PromptTemplate defines a prompt injection template matched by provider/model.
@@ -12,11 +14,6 @@ type PromptTemplate struct {
 	Position string            `json:"position"` // "system", "prepend_user", "append_user"
 	Content  string            `json:"content"`  // Template content with {{var}} placeholders
 	Vars     map[string]string `json:"vars"`     // Variable substitution table
-}
-
-// matchWildcard checks if a wildcard pattern matches a value.
-func matchWildcard(pattern, value string) bool {
-	return pattern == "" || pattern == "*" || pattern == value
 }
 
 // PromptInjector manages prompt templates and injects them into requests.
@@ -69,7 +66,7 @@ func (pi *PromptInjector) Templates() []PromptTemplate {
 }
 
 // Inject applies matching templates to the request.
-func (pi *PromptInjector) Inject(providerName, model string, req *ChatCompletionRequest) {
+func (pi *PromptInjector) Inject(providerName, model string, req *core.ChatCompletionRequest) {
 	pi.mu.RLock()
 	templates := pi.templates
 	pi.mu.RUnlock()
@@ -87,10 +84,13 @@ func (pi *PromptInjector) Inject(providerName, model string, req *ChatCompletion
 		case "append_user":
 			injectAppendUser(req, content)
 		default:
-			// Default to system injection.
 			injectSystem(req, content)
 		}
 	}
+}
+
+func matchWildcard(pattern, value string) bool {
+	return pattern == "" || pattern == "*" || pattern == value
 }
 
 func replaceVars(template string, vars map[string]string) string {
@@ -104,28 +104,27 @@ func replaceVars(template string, vars map[string]string) string {
 	return result
 }
 
-func injectSystem(req *ChatCompletionRequest, content string) {
+func injectSystem(req *core.ChatCompletionRequest, content string) {
 	for i := range req.Messages {
 		if req.Messages[i].Role == "system" {
 			req.Messages[i].Content = content
 			return
 		}
 	}
-	req.Messages = append([]Message{{Role: "system", Content: content}}, req.Messages...)
+	req.Messages = append([]core.Message{{Role: "system", Content: content}}, req.Messages...)
 }
 
-func injectPrependUser(req *ChatCompletionRequest, content string) {
+func injectPrependUser(req *core.ChatCompletionRequest, content string) {
 	for i := range req.Messages {
 		if req.Messages[i].Role == "user" {
 			req.Messages[i].Content = content + "\n\n" + req.Messages[i].Content
 			return
 		}
 	}
-	// No user message found; append at end.
-	req.Messages = append(req.Messages, Message{Role: "user", Content: content})
+	req.Messages = append(req.Messages, core.Message{Role: "user", Content: content})
 }
 
-func injectAppendUser(req *ChatCompletionRequest, content string) {
+func injectAppendUser(req *core.ChatCompletionRequest, content string) {
 	lastUser := -1
 	for i := range req.Messages {
 		if req.Messages[i].Role == "user" {
@@ -135,11 +134,11 @@ func injectAppendUser(req *ChatCompletionRequest, content string) {
 	if lastUser >= 0 {
 		req.Messages[lastUser].Content = req.Messages[lastUser].Content + "\n\n" + content
 	} else {
-		req.Messages = append(req.Messages, Message{Role: "user", Content: content})
+		req.Messages = append(req.Messages, core.Message{Role: "user", Content: content})
 	}
 }
 
-// InjectPromptOption returns a SchedulerOption that attaches a PromptInjector.
+// WithPromptInjector returns a SchedulerOption that attaches a PromptInjector.
 func WithPromptInjector(pi *PromptInjector) SchedulerOption {
 	return func(s *Scheduler) {
 		s.promptInjector = pi

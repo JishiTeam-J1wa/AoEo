@@ -1,4 +1,4 @@
-package aoeo
+package engine
 
 import (
 	"bufio"
@@ -8,36 +8,23 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/providers"
 	"github.com/sashabaranov/go-openai"
 )
 
-// StreamChunk represents a single chunk from an SSE stream.
-type StreamChunk struct {
-	Index        int     `json:"index"`
-	Delta        Message `json:"delta"`
-	FinishReason string  `json:"finish_reason,omitempty"`
-}
 
-// StreamCompletionResponse is yielded for each chunk during streaming.
-type StreamCompletionResponse struct {
-	ID    string      `json:"id"`
-	Model string      `json:"model"`
-	Chunk StreamChunk `json:"chunk"`
-	// Err is set when the stream encounters a non-EOF error.
-	// When Err is non-nil, the channel will be closed immediately after.
-	Err error `json:"-"`
-}
 
 // ChatCompleteStream performs a streaming chat completion using the primary provider.
 // The caller should read from the returned channel until it is closed.
 // Check chunk.Err to detect stream errors.
-func (s *Scheduler) ChatCompleteStream(ctx context.Context, req ChatCompletionRequest) (<-chan StreamCompletionResponse, error) {
-	if err := s.sem.acquire(ctx); err != nil {
+func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	if err := s.sem.Acquire(ctx); err != nil {
 		return nil, err
 	}
 	p := s.PickPrimaryProvider()
 	if p == nil {
-		s.sem.release()
+		s.sem.Release()
 		return nil, fmt.Errorf("no available provider")
 	}
 
@@ -53,15 +40,15 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req ChatCompletionRe
 
 	stream, err := chatCompleteStreamWithProvider(ctx, p, reqCopy)
 	if err != nil {
-		s.sem.release()
+		s.sem.Release()
 		return nil, err
 	}
 
 	// Wrap the stream channel so we release the semaphore when consumption finishes.
-	wrapped := make(chan StreamCompletionResponse, cap(stream))
+	wrapped := make(chan core.StreamCompletionResponse, cap(stream))
 	go func() {
 		defer close(wrapped)
-		defer s.sem.release()
+		defer s.sem.Release()
 		for msg := range stream {
 			select {
 			case <-ctx.Done():
@@ -73,12 +60,12 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req ChatCompletionRe
 	return wrapped, nil
 }
 
-func chatCompleteStreamWithProvider(ctx context.Context, p Provider, req ChatCompletionRequest) (<-chan StreamCompletionResponse, error) {
+func chatCompleteStreamWithProvider(ctx context.Context, p providers.Provider, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
 	cfg := p.Config()
 
 	var client *openai.Client
-	if op, ok := p.(*OpenAIProvider); ok {
-		client = op.client
+	if op, ok := p.(*providers.OpenAIProvider); ok {
+		client = op.Client
 	} else {
 		oc := openai.DefaultConfig(cfg.APIKey)
 		oc.BaseURL = cfg.Endpoint
@@ -117,7 +104,7 @@ func chatCompleteStreamWithProvider(ctx context.Context, p Provider, req ChatCom
 		return nil, fmt.Errorf("%s stream: %w", p.Name(), err)
 	}
 
-	ch := make(chan StreamCompletionResponse, 16)
+	ch := make(chan core.StreamCompletionResponse, 16)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -128,9 +115,9 @@ func chatCompleteStreamWithProvider(ctx context.Context, p Provider, req ChatCom
 		for {
 			select {
 			case <-ctx.Done():
-				ch <- StreamCompletionResponse{
+				ch <- core.StreamCompletionResponse{
 					Model: cfg.Model,
-					Chunk: StreamChunk{FinishReason: "cancelled"},
+					Chunk: core.StreamChunk{FinishReason: "cancelled"},
 					Err:   ctx.Err(),
 				}
 				return
@@ -142,9 +129,9 @@ func chatCompleteStreamWithProvider(ctx context.Context, p Provider, req ChatCom
 				return
 			}
 			if err != nil {
-				ch <- StreamCompletionResponse{
+				ch <- core.StreamCompletionResponse{
 					Model: cfg.Model,
-					Chunk: StreamChunk{
+					Chunk: core.StreamChunk{
 						FinishReason: "error",
 					},
 					Err: fmt.Errorf("%s stream recv: %w", p.Name(), err),
@@ -156,12 +143,12 @@ func chatCompleteStreamWithProvider(ctx context.Context, p Provider, req ChatCom
 				select {
 				case <-ctx.Done():
 					return
-				case ch <- StreamCompletionResponse{
+				case ch <- core.StreamCompletionResponse{
 					ID:    response.ID,
 					Model: response.Model,
-					Chunk: StreamChunk{
+					Chunk: core.StreamChunk{
 						Index: choice.Index,
-						Delta: Message{
+						Delta: core.Message{
 							Role:    choice.Delta.Role,
 							Content: choice.Delta.Content,
 						},
@@ -178,8 +165,8 @@ func chatCompleteStreamWithProvider(ctx context.Context, p Provider, req ChatCom
 
 // ParseSSE parses a raw Server-Sent Events stream into chunks.
 // Useful for debugging or proxying streams.
-func ParseSSE(r io.Reader) <-chan StreamChunk {
-	ch := make(chan StreamChunk, 8)
+func ParseSSE(r io.Reader) <-chan core.StreamChunk {
+	ch := make(chan core.StreamChunk, 8)
 	go func() {
 		defer close(ch)
 		scanner := bufio.NewScanner(r)
@@ -193,13 +180,13 @@ func ParseSSE(r io.Reader) <-chan StreamChunk {
 				return
 			}
 			// Minimal parse - users can extend with json.Unmarshal.
-			ch <- StreamChunk{
-				Delta: Message{Content: data},
+			ch <- core.StreamChunk{
+				Delta: core.Message{Content: data},
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			ch <- StreamChunk{
-				Delta: Message{Content: fmt.Sprintf("[SSE parse error: %v]", err)},
+			ch <- core.StreamChunk{
+				Delta: core.Message{Content: fmt.Sprintf("[SSE parse error: %v]", err)},
 			}
 		}
 	}()

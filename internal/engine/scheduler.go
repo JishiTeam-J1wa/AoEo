@@ -1,4 +1,4 @@
-package aoeo
+package engine
 
 import (
 	"context"
@@ -6,6 +6,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/providers"
 )
 
 // SchedulerOption configures a Scheduler.
@@ -26,14 +29,14 @@ func WithHistory(h *History) SchedulerOption {
 }
 
 // WithRetry sets the retry configuration for the scheduler.
-func WithRetry(cfg RetryConfig) SchedulerOption {
+func WithRetry(cfg core.RetryConfig) SchedulerOption {
 	return func(s *Scheduler) {
 		s.retry = cfg
 	}
 }
 
 type availCacheEntry struct {
-	providers []Provider
+	providers []providers.Provider
 	time      time.Time
 }
 
@@ -41,8 +44,8 @@ type availCacheEntry struct {
 // and concurrency control. It is the core of AoEo's multi-provider aggregation.
 type Scheduler struct {
 	mu           sync.RWMutex
-	providers    []Provider
-	providerCfgs []ProviderConfig
+	providers    []providers.Provider
+	providerCfgs []core.ProviderConfig
 	sem          *adaptiveSemaphore
 
 	// Round-robin index for fallback/load balancing.
@@ -55,7 +58,7 @@ type Scheduler struct {
 	history *History
 
 	// Optional retry configuration.
-	retry RetryConfig
+	retry core.RetryConfig
 
 	// Optional prompt injector.
 	promptInjector *PromptInjector
@@ -72,9 +75,9 @@ type Scheduler struct {
 
 // NewScheduler creates a new scheduler with the given providers.
 // If no providers are given, call ApplyConfig later.
-func NewScheduler(providers ...Provider) *Scheduler {
+func NewScheduler(provs ...providers.Provider) *Scheduler {
 	totalSlots := 0
-	for _, p := range providers {
+	for _, p := range provs {
 		if cfg := p.Config(); cfg.Name != "" {
 			slots := cfg.MaxConcurrent
 			if slots <= 0 {
@@ -88,8 +91,8 @@ func NewScheduler(providers ...Provider) *Scheduler {
 	}
 
 	s := &Scheduler{
-		providers:     providers,
-		sem:           newAdaptiveSemaphore(totalSlots),
+		providers:     provs,
+		sem:           NewAdaptiveSemaphore(totalSlots),
 		timeout:       45 * time.Second,
 		availCacheTTL: 1 * time.Second,
 		closeCh:       make(chan struct{}),
@@ -98,7 +101,7 @@ func NewScheduler(providers ...Provider) *Scheduler {
 }
 
 // NewSchedulerWithOptions creates a scheduler with options.
-func NewSchedulerWithOptions(providers []Provider, opts ...SchedulerOption) *Scheduler {
+func NewSchedulerWithOptions(providers []providers.Provider, opts ...SchedulerOption) *Scheduler {
 	s := NewScheduler(providers...)
 	for _, opt := range opts {
 		opt(s)
@@ -107,12 +110,12 @@ func NewSchedulerWithOptions(providers []Provider, opts ...SchedulerOption) *Sch
 }
 
 // ApplyConfig applies the given configuration, creating provider instances.
-func (s *Scheduler) ApplyConfig(cfg Config) error {
+func (s *Scheduler) ApplyConfig(cfg core.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var providers []Provider
-	var cfgs []ProviderConfig
+	var providers []providers.Provider
+	var cfgs []core.ProviderConfig
 	totalSlots := 0
 	for _, pc := range cfg.Providers {
 		p := CreateProvider(pc)
@@ -140,18 +143,18 @@ func (s *Scheduler) ApplyConfig(cfg Config) error {
 }
 
 // CreateProvider creates the appropriate provider instance based on config name.
-func CreateProvider(cfg ProviderConfig) Provider {
+func CreateProvider(cfg core.ProviderConfig) providers.Provider {
 	switch cfg.Name {
 	case "deepseek":
-		return NewDeepSeekProvider(cfg)
+		return providers.NewDeepSeekProvider(cfg)
 	case "glm":
-		return NewGLMProvider(cfg)
+		return providers.NewGLMProvider(cfg)
 	case "qwen":
-		return NewQwenProvider(cfg)
+		return providers.NewQwenProvider(cfg)
 	case "kimi":
-		return NewKimiProvider(cfg)
+		return providers.NewKimiProvider(cfg)
 	default:
-		return NewOpenAIProvider(cfg)
+		return providers.NewOpenAIProvider(cfg)
 	}
 }
 
@@ -175,14 +178,14 @@ func (s *Scheduler) Close() error {
 }
 
 // ChatComplete performs a chat completion using the primary (first available) provider.
-func (s *Scheduler) ChatComplete(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
+func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
-	if err := s.sem.acquire(ctx); err != nil {
+	if err := s.sem.Acquire(ctx); err != nil {
 		return nil, err
 	}
-	defer s.sem.release()
+	defer s.sem.Release()
 
 	p := s.PickPrimaryProvider()
 	if p == nil {
@@ -204,11 +207,11 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req ChatCompletionRequest)
 	defer cancel()
 
 	start := time.Now()
-	var resp *ChatCompletionResponse
+	var resp *core.ChatCompletionResponse
 	var err error
 
 	if s.retry.MaxRetries > 0 {
-		err = doRetry(providerCtx, s.retry, func() error {
+		err = DoRetry(providerCtx, s.retry, func() error {
 			var innerErr error
 			resp, innerErr = p.ChatComplete(providerCtx, reqCopy)
 			return innerErr
@@ -234,7 +237,7 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req ChatCompletionRequest)
 		if resp != nil {
 			pricing := p.Config().Pricing
 			if pricing.Currency == "" && pricing.PromptPer1K == 0 && pricing.CompletionPer1K == 0 {
-				pricing = DefaultPricing(p.Name(), reqCopy.Model)
+				pricing = core.DefaultPricing(p.Name(), reqCopy.Model)
 			}
 			record.Cost = resp.Usage.Cost(pricing)
 			record.Currency = pricing.Currency
@@ -247,11 +250,11 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req ChatCompletionRequest)
 
 // ChatCompleteWithFallback tries the primary provider first; on failure,
 // it falls back to the next available provider automatically.
-func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
+func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
-	available := s.availableProviders()
+	available := s.AvailableProviders()
 	if len(available) == 0 {
 		return nil, fmt.Errorf("no available provider")
 	}
@@ -259,7 +262,7 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req ChatComple
 	var lastErr error
 	var fallbackFrom string
 	for i, p := range available {
-		if err := s.sem.acquire(ctx); err != nil {
+		if err := s.sem.Acquire(ctx); err != nil {
 			return nil, err
 		}
 		// Fill default model if needed (use copy to avoid polluting the original req).
@@ -274,7 +277,7 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req ChatComple
 		start := time.Now()
 		resp, err := p.ChatComplete(providerCtx, reqCopy)
 		cancel()
-		s.sem.release()
+		s.sem.Release()
 
 		// Record history.
 		if s.history != nil {
@@ -295,7 +298,7 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req ChatComple
 			if resp != nil {
 				pricing := p.Config().Pricing
 				if pricing.Currency == "" && pricing.PromptPer1K == 0 && pricing.CompletionPer1K == 0 {
-					pricing = DefaultPricing(p.Name(), reqCopy.Model)
+					pricing = core.DefaultPricing(p.Name(), reqCopy.Model)
 				}
 				record.Cost = resp.Usage.Cost(pricing)
 				record.Currency = pricing.Currency
@@ -316,11 +319,11 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req ChatComple
 
 // ChatCompleteDual sends the request to two different providers concurrently
 // and returns both results for comparison/merging.
-func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequest) (*DualResult, error) {
+func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletionRequest) (*core.DualResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
-	available := s.availableProviders()
+	available := s.AvailableProviders()
 	if len(available) == 0 {
 		return nil, fmt.Errorf("no available provider")
 	}
@@ -330,7 +333,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequ
 		return nil, fmt.Errorf("no available provider")
 	}
 
-	var p2 Provider
+	var p2 providers.Provider
 	for attempt := 0; attempt < len(available)*2 && p2 == nil; attempt++ {
 		candidate := s.PickProviderRoundRobin()
 		if candidate != nil && candidate.Name() != p1.Name() {
@@ -343,16 +346,16 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequ
 		if err != nil {
 			return nil, err
 		}
-		return &DualResult{Result1: resp, Consensus: true}, nil
+		return &core.DualResult{Result1: resp, Consensus: true}, nil
 	}
 
-	if err := s.sem.acquireN(ctx, 2); err != nil {
+	if err := s.sem.AcquireN(ctx, 2); err != nil {
 		return nil, err
 	}
-	defer s.sem.releaseN(2)
+	defer s.sem.ReleaseN(2)
 
 	type outcome struct {
-		resp *ChatCompletionResponse
+		resp *core.ChatCompletionResponse
 		err  error
 	}
 	ch1 := make(chan outcome, 1)
@@ -406,7 +409,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequ
 		if o1.resp != nil {
 			pricing := p1.Config().Pricing
 			if pricing.Currency == "" && pricing.PromptPer1K == 0 && pricing.CompletionPer1K == 0 {
-				pricing = DefaultPricing(p1.Name(), p1.Config().Model)
+				pricing = core.DefaultPricing(p1.Name(), p1.Config().Model)
 			}
 			record1.Cost = o1.resp.Usage.Cost(pricing)
 			record1.Currency = pricing.Currency
@@ -427,7 +430,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequ
 		if o2.resp != nil {
 			pricing := p2.Config().Pricing
 			if pricing.Currency == "" && pricing.PromptPer1K == 0 && pricing.CompletionPer1K == 0 {
-				pricing = DefaultPricing(p2.Name(), p2.Config().Model)
+				pricing = core.DefaultPricing(p2.Name(), p2.Config().Model)
 			}
 			record2.Cost = o2.resp.Usage.Cost(pricing)
 			record2.Currency = pricing.Currency
@@ -435,7 +438,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequ
 		s.history.Record(record2)
 	}
 
-	dual := &DualResult{Result1: o1.resp, Result2: o2.resp}
+	dual := &core.DualResult{Result1: o1.resp, Result2: o2.resp}
 	if dual.Result1 == nil && dual.Result2 == nil {
 		return nil, fmt.Errorf("dual completion failed: %w; %w", o1.err, o2.err)
 	}
@@ -448,7 +451,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req ChatCompletionRequ
 
 // availableProviders returns the currently available providers.
 // It uses a short-lived cache to avoid repeated scans under high load.
-func (s *Scheduler) availableProviders() []Provider {
+func (s *Scheduler) AvailableProviders() []providers.Provider {
 	// Try cache first.
 	if cached := s.availCache.Load(); cached != nil {
 		if time.Since(cached.time) < s.availCacheTTL {
@@ -457,11 +460,11 @@ func (s *Scheduler) availableProviders() []Provider {
 	}
 
 	s.mu.RLock()
-	providers := s.providers
+	allProvs := s.providers
 	s.mu.RUnlock()
 
-	var available []Provider
-	for _, p := range providers {
+	var available []providers.Provider
+	for _, p := range allProvs {
 		if p.IsAvailable() {
 			available = append(available, p)
 		}
@@ -476,8 +479,8 @@ func (s *Scheduler) availableProviders() []Provider {
 }
 
 // pickPrimaryProvider returns the first available provider (user's designated primary).
-func (s *Scheduler) PickPrimaryProvider() Provider {
-	available := s.availableProviders()
+func (s *Scheduler) PickPrimaryProvider() providers.Provider {
+	available := s.AvailableProviders()
 	if len(available) == 0 {
 		return nil
 	}
@@ -485,8 +488,8 @@ func (s *Scheduler) PickPrimaryProvider() Provider {
 }
 
 // pickProviderRoundRobin selects the next available provider using round-robin.
-func (s *Scheduler) PickProviderRoundRobin() Provider {
-	available := s.availableProviders()
+func (s *Scheduler) PickProviderRoundRobin() providers.Provider {
+	available := s.AvailableProviders()
 	if len(available) == 0 {
 		return nil
 	}
@@ -495,18 +498,18 @@ func (s *Scheduler) PickProviderRoundRobin() Provider {
 	return available[idx]
 }
 
-// ProviderStatus returns the runtime status of each configured provider.
-func (s *Scheduler) ProviderStatus() []ProviderStatus {
+// core.ProviderStatus returns the runtime status of each configured provider.
+func (s *Scheduler) ProviderStatus() []core.ProviderStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	status := make([]ProviderStatus, 0, len(s.providers))
+	status := make([]core.ProviderStatus, 0, len(s.providers))
 	for i, p := range s.providers {
 		model := ""
 		if i < len(s.providerCfgs) {
 			model = s.providerCfgs[i].Model
 		}
-		status = append(status, ProviderStatus{
+		status = append(status, core.ProviderStatus{
 			Name:      p.Name(),
 			Available: p.IsAvailable(),
 			Model:     model,
@@ -518,17 +521,17 @@ func (s *Scheduler) ProviderStatus() []ProviderStatus {
 // TestProvider tests connectivity to a specific provider by name.
 func (s *Scheduler) TestProvider(ctx context.Context, providerName string) error {
 	s.mu.RLock()
-	providers := s.providers
+	allProvs := s.providers
 	s.mu.RUnlock()
 
-	for _, p := range providers {
+	for _, p := range allProvs {
 		if p.Name() == providerName {
 			if !p.IsAvailable() {
 				return fmt.Errorf("provider %s config incomplete", providerName)
 			}
 			testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			_, err := p.ChatComplete(testCtx, ChatCompletionRequest{
-				Messages: []Message{
+			_, err := p.ChatComplete(testCtx, core.ChatCompletionRequest{
+				Messages: []core.Message{
 					{Role: "user", Content: "Hi"},
 				},
 			})
@@ -543,12 +546,12 @@ func (s *Scheduler) TestProvider(ctx context.Context, providerName string) error
 }
 
 // ListModels returns the list of available models for a specific provider.
-func (s *Scheduler) ListModels(ctx context.Context, providerName string) ([]ModelInfo, error) {
+func (s *Scheduler) ListModels(ctx context.Context, providerName string) ([]core.ModelInfo, error) {
 	s.mu.RLock()
-	providers := s.providers
+	allProvs := s.providers
 	s.mu.RUnlock()
 
-	for _, p := range providers {
+	for _, p := range allProvs {
 		if p.Name() == providerName {
 			return p.ListModels(ctx)
 		}
@@ -558,7 +561,7 @@ func (s *Scheduler) ListModels(ctx context.Context, providerName string) ([]Mode
 
 // ListModelsWithConfig queries model list using a temporary config,
 // without requiring the provider to be saved in the scheduler.
-func (s *Scheduler) ListModelsWithConfig(ctx context.Context, cfg ProviderConfig) ([]ModelInfo, error) {
+func (s *Scheduler) ListModelsWithConfig(ctx context.Context, cfg core.ProviderConfig) ([]core.ModelInfo, error) {
 	p := CreateProvider(cfg)
 	if p == nil {
 		return nil, fmt.Errorf("cannot create provider: %s", cfg.Name)
@@ -567,18 +570,18 @@ func (s *Scheduler) ListModelsWithConfig(ctx context.Context, cfg ProviderConfig
 }
 
 // Acquire reserves a slot in the concurrency semaphore.
-func (s *Scheduler) Acquire() error { return s.sem.acquire(context.Background()) }
+func (s *Scheduler) Acquire() error { return s.sem.Acquire(context.Background()) }
 
 // Release frees a slot in the concurrency semaphore.
-func (s *Scheduler) Release() { s.sem.release() }
+func (s *Scheduler) Release() { s.sem.Release() }
 
 // SetSystemPrompt sets the system prompt override on all providers.
 func (s *Scheduler) SetSystemPrompt(sp string) {
 	s.mu.RLock()
-	providers := s.providers
+	allProvs := s.providers
 	s.mu.RUnlock()
 
-	for _, p := range providers {
+	for _, p := range allProvs {
 		if bp, ok := p.(interface{ SetSystemPrompt(string) }); ok {
 			bp.SetSystemPrompt(sp)
 		}
@@ -588,10 +591,10 @@ func (s *Scheduler) SetSystemPrompt(sp string) {
 // ClearSystemPrompt removes the system prompt override from all providers.
 func (s *Scheduler) ClearSystemPrompt() {
 	s.mu.RLock()
-	providers := s.providers
+	allProvs := s.providers
 	s.mu.RUnlock()
 
-	for _, p := range providers {
+	for _, p := range allProvs {
 		if bp, ok := p.(interface{ ClearSystemPrompt() }); ok {
 			bp.ClearSystemPrompt()
 		}
@@ -603,4 +606,19 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// History returns the attached history recorder (may be nil).
+func (s *Scheduler) History() *History {
+	return s.history
+}
+
+// PromptInjector returns the attached prompt injector (may be nil).
+func (s *Scheduler) PromptInjector() *PromptInjector {
+	return s.promptInjector
+}
+
+// SetPromptInjector attaches a prompt injector to the scheduler.
+func (s *Scheduler) SetPromptInjector(pi *PromptInjector) {
+	s.promptInjector = pi
 }
