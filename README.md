@@ -251,31 +251,25 @@ client.SetEmitter(&MyEmitter{})
 AoEo/
 ├── client.go          # 用户入口，fluent API
 ├── scheduler.go       # 核心调度：路由、限流、注入、记录
-├── provider.go        # BaseProvider：熔断器、事件、系统提示
-├── openai.go          # 通用 OpenAI-compatible Provider 适配器
-├── deepseek.go        # DeepSeek 内置 Provider
-├── kimi.go            # Kimi 内置 Provider
-├── glm.go             # GLM 内置 Provider
-├── qwen.go            # Qwen 内置 Provider
+├── providers.go       # Provider 接口 + BaseProvider + 全部内置 Provider
 ├── types.go           # 统一请求/响应类型
-├── cost.go            # 价格模型与成本计算
+├── options.go         # 请求构建器
+├── config.go          # 配置验证
+├── history.go         # 调用历史 + 成本计算 + 统计聚合
 ├── prompt.go          # Prompt 模板注入引擎
-├── history.go         # 调用历史与统计聚合
-├── semaphore.go       # 自适应并发限流
 ├── retry.go           # 指数退避重试
 ├── stream.go          # SSE 流式支持
 ├── audit.go           # 审计模式
 ├── event.go           # 事件系统
 ├── logger.go          # 结构化日志
-├── merge.go           # 多结果合并
-├── result.go          # 结果处理工具
-├── options.go         # 请求构建器
-├── config.go          # 配置验证
+├── result.go          # 结果处理 + JSON 提取 + 多结果合并
+├── semaphore.go       # 自适应并发限流
 ├── aoeo_test.go       # 32 个单元测试（含 Race Detector）
 ├── README.md          # 本文档
 ├── DESIGN.md          # 架构设计文档
 ├── INTEGRATION.md     # 系统集成指南
 ├── AUDIT_REPORT.md    # 审计报告
+├── LICENSE
 └── examples/          # 示例代码
     ├── basic/
     ├── multi_provider/
