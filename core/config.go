@@ -1,20 +1,24 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ProviderConfig holds the configuration for a single AI provider.
 type ProviderConfig struct {
-	Name          string  `json:"name"`
-	APIKey        string  `json:"apiKey"`
-	Endpoint      string  `json:"endpoint"`
-	Model         string  `json:"model"`
-	MaxConcurrent int     `json:"maxConcurrent"`
-	SkipTLSVerify bool    `json:"skipTLSVerify"`
-	Pricing       Pricing `json:"pricing"` // Optional; falls back to DefaultPricing
+	Name             string        `json:"name"`
+	APIKey           string        `json:"apiKey"`
+	Endpoint         string        `json:"endpoint"`
+	Model            string        `json:"model"`
+	MaxConcurrent    int           `json:"maxConcurrent"`
+	SkipTLSVerify    bool          `json:"skipTLSVerify"`
+	Pricing          Pricing       `json:"pricing"`          // Optional; falls back to DefaultPricing
+	MaxFailures      int           `json:"maxFailures"`      // Circuit breaker threshold (default 3)
+	CooldownDuration time.Duration `json:"cooldownDuration"` // Circuit breaker cooldown (default 60s)
 }
 
 // Config holds the full configuration including all providers and mode.
@@ -52,6 +56,18 @@ func ValidateConfig(cfg ProviderConfig) []string {
 	}
 
 	return issues
+}
+
+// MarshalJSON masks sensitive fields (APIKey) so that serializing a Config does not leak credentials.
+func (cfg ProviderConfig) MarshalJSON() ([]byte, error) {
+	type Alias ProviderConfig
+	return json.Marshal(&struct {
+		*Alias
+		APIKey string `json:"apiKey"`
+	}{
+		Alias:  (*Alias)(&cfg),
+		APIKey: "***",
+	})
 }
 
 // Validate checks all providers in a Config and returns a map of provider name -> issues.

@@ -57,7 +57,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("\n[Primary]", resp.Choices[0].Message.Content)
+	fmt.Println("\n[Primary]", resp.Content())
 	fmt.Printf("  Cost: %.4f %s\n", resp.Usage.Cost(cfg.Providers[0].Pricing), cfg.Providers[0].Pricing.Currency)
 
 	// 2. With fallback (tries primary, then falls back to next)
@@ -65,7 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("\n[With Fallback]", resp.Choices[0].Message.Content)
+	fmt.Println("\n[With Fallback]", resp.Content())
 
 	// 3. Dual mode (queries two different providers concurrently)
 	dual, err := client.ChatCompleteDual(context.Background(), req)
@@ -73,11 +73,11 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("\n[Dual] Consensus: %v\n", dual.Consensus)
-	if dual.Result1 != nil {
-		fmt.Println("Provider 1:", dual.Result1.Choices[0].Message.Content)
+	if dual.Result1 != nil && len(dual.Result1.Choices) > 0 {
+		fmt.Println("Provider 1:", dual.Result1.Content())
 	}
-	if dual.Result2 != nil {
-		fmt.Println("Provider 2:", dual.Result2.Choices[0].Message.Content)
+	if dual.Result2 != nil && len(dual.Result2.Choices) > 0 {
+		fmt.Println("Provider 2:", dual.Result2.Content())
 	}
 
 	// 4. Show aggregated stats

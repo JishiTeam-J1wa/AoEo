@@ -125,6 +125,7 @@ type BaseProvider struct {
 - **系统提示词覆盖**：支持运行时动态替换
 - **模型列表查询**：统一通过 OpenAI-compatible `/models` 端点
 - **结构化日志**：使用 `log/slog` 记录熔断、失败、恢复事件
+- **零 panic 承诺**：所有 provider 调用路径均有 `recover()`，自定义 provider panic 不会崩溃进程
 
 #### 2.2.3 Scheduler — 调度核心
 
@@ -145,7 +146,7 @@ type BaseProvider struct {
 | Fallback | 顺序遍历 | 主 Provider 失败后逐个尝试，每次获取信号量许可 |
 | Dual 模式 | Round-Robin | 选两个不同 Provider 并发调用 |
 | Audit | Round-Robin | 主结果完成后用另一个 Provider 审计（各自独立 timeout + panic recover）|
-| Stream | Primary | 通过 `OpenAIProvider.client` 复用 go-openai 的 SSE 流 |
+| Stream | Primary | 通过 `OpenAIProvider.client` 复用 go-openai 的 SSE 流，支持 `Usage` 透传 |
 
 #### 2.2.4 Adaptive Semaphore — 自适应并发限流
 
@@ -304,7 +305,11 @@ User → Client.ChatCompleteStream()
 stream, err := client.ChatCompleteStream(ctx, req)
 for chunk := range stream {
     if chunk.Err != nil { log.Fatal(chunk.Err) }
-    if chunk.Chunk.FinishReason != "" { break }
+    if chunk.Chunk.FinishReason != "" {
+        // 最终 chunk 可能携带 Usage（若 Provider 支持）
+        fmt.Printf("Tokens: %d prompt, %d completion\n", chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+        break
+    }
     fmt.Print(chunk.Chunk.Delta.Content)
 }
 ```
@@ -312,7 +317,9 @@ for chunk := range stream {
 - 基于 go-openai SDK 的 `CreateChatCompletionStream`
 - 返回 channel，用户通过 range 读取
 - 每个 chunk 包含 Delta（增量内容）和 FinishReason
+- **Usage 透传**：最终 chunk 携带 Token 用量（需 Provider 支持 `stream_options: {"include_usage": true}`）
 - 错误通过 `chunk.Err` 传递，而非 panic 或关闭 channel
+- **生命周期一致性**：与其他方法一样，Close 后禁止调用，且自动应用 `s.timeout`
 
 ### 4.2 SSE 解析
 
@@ -416,19 +423,21 @@ type EventEmitter interface {
 
 | 功能 | 说明 |
 |---|---|
-| 多 Provider 注册与管理 | 配置即代码 |
+| 多 Provider 注册与管理 | 配置即代码，自动过滤 nil provider |
 | 请求路由与负载均衡 | Primary / Round-Robin |
 | 熔断与恢复 | 自动，无需配置 |
 | 并发控制 | 自适应信号量 |
 | 模型列表查询 | 统一接口 |
-| 连通性测试 | 内置 |
+| 连通性测试 | 内置，带 panic 恢复 |
 | 双模型验证 | Dual / Audit 模式 |
-| 流式响应 | SSE 支持 |
-| **Prompt 注入** | 通配匹配 + 变量替换 |
+| 流式响应 | SSE 支持，Usage 透传 |
+| **Prompt 注入** | 通配匹配 + 变量替换（atomic 线程安全） |
 | **成本统计** | 自动按 Provider 聚合 |
 | **指数退避重试** | 可配置策略 |
 | **优雅关闭** | `Close()` 安全释放 |
 | **结构化日志** | `slog` JSON 输出 |
+| **请求预验证** | `Validate()` 提前拦截无效参数 |
+| **安全访问器** | `Content()` 避免 `Choices[0]` panic |
 
 ---
 
@@ -533,6 +542,9 @@ scheduler := aoeo.NewScheduler(providers...)
 - **Graceful Shutdown**：始终 `defer client.Close()` 或显式调用 `Close()`，确保 goroutine 和资源被正确释放
 - **Stream Cancel**：流式消费端提前退出时，应同时 `cancel()` context，否则内部 goroutine 可能泄漏
 - **Context 超时**：为每次调用设置合理的 `context.WithTimeout()`，避免 Provider 无响应时 goroutine 长期阻塞
+- **Nil 安全访问**：优先使用 `resp.Content()` 而非 `resp.Choices[0].Message.Content`，避免空响应 panic
+- **请求预验证**：生产环境建议在发送前调用 `req.Validate()`，提前发现参数错误
+- **并发修改配置**：`SetTimeout()`、`SetPromptInjector()` 均为线程安全，可在运行时动态调整
 
 ### 12.2 并发与配额
 

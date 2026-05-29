@@ -4,7 +4,8 @@ package core
 // Implementations can be attached to a Client to receive progress notifications.
 type EventEmitter interface {
 	// Emit sends an event with the given topic and data payload.
-	// Implementations should be safe for concurrent use.
+	// Implementations must be safe for concurrent use and should return quickly
+	// (do not perform blocking I/O inside Emit).
 	Emit(topic string, data ...any)
 }
 
@@ -20,4 +21,5 @@ const (
 	EventProviderRecover = "provider:recover"
 	EventFallbackTrigger = "scheduler:fallback"
 	EventAuditDisagree   = "audit:disagree"
+	EventDualComplete    = "scheduler:dual"
 )

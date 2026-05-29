@@ -97,11 +97,11 @@ func replaceVars(template string, vars map[string]string) string {
 	if len(vars) == 0 {
 		return template
 	}
-	result := template
+	pairs := make([]string, 0, len(vars)*2)
 	for k, v := range vars {
-		result = strings.ReplaceAll(result, "{{"+k+"}}", v)
+		pairs = append(pairs, "{{"+k+"}}", v)
 	}
-	return result
+	return strings.NewReplacer(pairs...).Replace(template)
 }
 
 func injectSystem(req *core.ChatCompletionRequest, content string) {
@@ -141,7 +141,7 @@ func injectAppendUser(req *core.ChatCompletionRequest, content string) {
 // WithPromptInjector returns a SchedulerOption that attaches a PromptInjector.
 func WithPromptInjector(pi *PromptInjector) SchedulerOption {
 	return func(s *Scheduler) {
-		s.promptInjector = pi
+		s.promptInjector.Store(pi)
 	}
 }
 

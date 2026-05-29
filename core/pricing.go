@@ -21,10 +21,11 @@ func (u Usage) Cost(p Pricing) float64 {
 
 // CostString returns a human-readable cost string.
 func (u Usage) CostString(p Pricing) string {
-	if p.Currency == "" {
-		p.Currency = "CNY"
+	currency := p.Currency
+	if currency == "" {
+		currency = "CNY"
 	}
-	return fmt.Sprintf("%.6f %s", u.Cost(p), p.Currency)
+	return fmt.Sprintf("%.6f %s", u.Cost(p), currency)
 }
 
 // DefaultPricing returns built-in pricing for known providers/models.

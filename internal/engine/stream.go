@@ -7,25 +7,28 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
 	"github.com/JishiTeam-J1wa/AoEo/providers"
 	"github.com/sashabaranov/go-openai"
 )
 
-
-
 // ChatCompleteStream performs a streaming chat completion using the primary provider.
-// The caller should read from the returned channel until it is closed.
+// The caller MUST read from the returned channel until it is closed, or cancel the
+// provided context, to avoid leaking the background goroutine and the semaphore slot.
 // Check chunk.Err to detect stream errors.
 func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
 	if err := s.sem.Acquire(ctx); err != nil {
 		return nil, err
 	}
 	p := s.PickPrimaryProvider()
 	if p == nil {
 		s.sem.Release()
-		return nil, fmt.Errorf("no available provider")
+		return nil, ErrNoAvailableProvider
 	}
 
 	reqCopy := req
@@ -34,12 +37,14 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 	}
 
 	// Apply prompt injection if configured.
-	if s.promptInjector != nil {
-		s.promptInjector.Inject(p.Name(), reqCopy.Model, &reqCopy)
+	if pi := s.promptInjector.Load(); pi != nil {
+		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
-	stream, err := chatCompleteStreamWithProvider(ctx, p, reqCopy)
+	streamCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
+	stream, err := chatCompleteStreamWithProvider(streamCtx, p, reqCopy)
 	if err != nil {
+		cancel()
 		s.sem.Release()
 		return nil, err
 	}
@@ -49,9 +54,10 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 	go func() {
 		defer close(wrapped)
 		defer s.sem.Release()
+		defer cancel()
 		for msg := range stream {
 			select {
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 				return
 			case wrapped <- msg:
 			}
@@ -88,12 +94,17 @@ func chatCompleteStreamWithProvider(ctx context.Context, p providers.Provider, r
 	}
 
 	streamReq := openai.ChatCompletionRequest{
-		Model:          req.Model,
-		Messages:       messages,
-		Temperature:    req.Temperature,
-		MaxTokens:      req.MaxTokens,
-		ResponseFormat: respFormat,
-		Stream:         true,
+		Model:            req.Model,
+		Messages:         messages,
+		Temperature:      req.Temperature,
+		MaxTokens:        req.MaxTokens,
+		TopP:             req.TopP,
+		PresencePenalty:  req.PresencePenalty,
+		FrequencyPenalty: req.FrequencyPenalty,
+		Stop:             req.Stop,
+		Seed:             req.Seed,
+		ResponseFormat:   respFormat,
+		Stream:           true,
 	}
 	if streamReq.Model == "" {
 		streamReq.Model = cfg.Model
@@ -139,6 +150,16 @@ func chatCompleteStreamWithProvider(ctx context.Context, p providers.Provider, r
 				return
 			}
 
+			// Map usage if present (typically on the final chunk).
+			var usage core.Usage
+			if response.Usage != nil {
+				usage = core.Usage{
+					PromptTokens:     response.Usage.PromptTokens,
+					CompletionTokens: response.Usage.CompletionTokens,
+					TotalTokens:      response.Usage.TotalTokens,
+				}
+			}
+
 			for _, choice := range response.Choices {
 				select {
 				case <-ctx.Done():
@@ -154,6 +175,7 @@ func chatCompleteStreamWithProvider(ctx context.Context, p providers.Provider, r
 						},
 						FinishReason: string(choice.FinishReason),
 					},
+					Usage: usage,
 				}:
 				}
 			}
@@ -170,6 +192,7 @@ func ParseSSE(r io.Reader) <-chan core.StreamChunk {
 	go func() {
 		defer close(ch)
 		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {

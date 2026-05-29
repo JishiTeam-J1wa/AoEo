@@ -44,7 +44,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Println(resp.Choices[0].Message.Content)
+	fmt.Println(resp.Content())
 	fmt.Printf("Tokens: %d prompt, %d completion\n",
 		resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	fmt.Printf("Cost: %.4f CNY\n",

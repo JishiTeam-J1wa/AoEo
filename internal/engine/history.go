@@ -9,18 +9,18 @@ import (
 
 // CallRecord represents a single AI provider invocation.
 type CallRecord struct {
-	ID           string                    `json:"id"`
-	Provider     string                    `json:"provider"`
-	Model        string                    `json:"model"`
-	Request      core.ChatCompletionRequest `json:"request"`
+	ID           string                       `json:"id"`
+	Provider     string                       `json:"provider"`
+	Model        string                       `json:"model"`
+	Request      core.ChatCompletionRequest   `json:"request"`
 	Response     *core.ChatCompletionResponse `json:"response,omitempty"`
-	Error        string                    `json:"error,omitempty"`
-	LatencyMs    int64                     `json:"latency_ms"`
-	Timestamp    time.Time                 `json:"timestamp"`
-	Tags         []string                  `json:"tags,omitempty"`
-	FallbackFrom string                    `json:"fallback_from,omitempty"`
-	Cost         float64                   `json:"cost"`
-	Currency     string                    `json:"currency"`
+	Error        string                       `json:"error,omitempty"`
+	LatencyMs    int64                        `json:"latency_ms"`
+	Timestamp    time.Time                    `json:"timestamp"`
+	Tags         []string                     `json:"tags,omitempty"`
+	FallbackFrom string                       `json:"fallback_from,omitempty"`
+	Cost         float64                      `json:"cost"`
+	Currency     string                       `json:"currency"`
 }
 
 // History tracks recent AI provider calls with thread-safe access.
@@ -45,7 +45,9 @@ func (h *History) Record(r CallRecord) {
 
 	h.records = append(h.records, r)
 	if len(h.records) > h.maxSize {
-		h.records = h.records[len(h.records)-h.maxSize:]
+		newRecords := make([]CallRecord, h.maxSize)
+		copy(newRecords, h.records[len(h.records)-h.maxSize:])
+		h.records = newRecords
 	}
 }
 
@@ -75,6 +77,9 @@ func (h *History) RecordsByTag(tag string) []CallRecord {
 			}
 		}
 	}
+	if result == nil {
+		return []CallRecord{}
+	}
 	return result
 }
 
@@ -88,6 +93,9 @@ func (h *History) RecordsByProvider(name string) []CallRecord {
 		if h.records[i].Provider == name {
 			result = append(result, h.records[i])
 		}
+	}
+	if result == nil {
+		return []CallRecord{}
 	}
 	return result
 }
@@ -107,6 +115,7 @@ func (h *History) Stats() map[string]ProviderStats {
 	stats := make(map[string]ProviderStats)
 	for _, r := range h.records {
 		s := stats[r.Provider]
+		s.Provider = r.Provider
 		s.TotalCalls++
 		s.TotalLatencyMs += r.LatencyMs
 		if r.Error != "" {
@@ -116,18 +125,15 @@ func (h *History) Stats() map[string]ProviderStats {
 			s.MaxLatencyMs = r.LatencyMs
 		}
 		s.TotalCost += r.Cost
+		if s.Currency == "" && r.Currency != "" {
+			s.Currency = r.Currency
+		}
 		stats[r.Provider] = s
 	}
 
 	for name, s := range stats {
 		if s.TotalCalls > 0 {
 			s.AvgLatencyMs = s.TotalLatencyMs / int64(s.TotalCalls)
-		}
-		for i := len(h.records) - 1; i >= 0; i-- {
-			if h.records[i].Provider == name && h.records[i].Currency != "" {
-				s.Currency = h.records[i].Currency
-				break
-			}
 		}
 		stats[name] = s
 	}

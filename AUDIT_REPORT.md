@@ -284,3 +284,145 @@ issuesMap := cfg.Validate() // map[providerName][]issue
 | 新增测试 | 12 个 |
 | 编译状态 | ✅ 通过 |
 | 测试状态 | ✅ 12/12 通过 |
+
+
+---
+
+## 七、第三轮审计（2026-05-29）— 第三方 SDK 可用性
+
+> 审计视角：从 Web / CLI / Desktop 应用集成方的角度，检查接口稳定性、零 panic 承诺、资源控制和向后兼容。
+
+### 7.1 P0 级问题（已修复）
+
+#### 7.1.1 `s.timeout` 数据竞争
+
+**问题**：`SetTimeout()` 使用 `sync.Mutex` 写入，但 `ChatComplete` / `ChatCompleteWithFallback` / `ChatCompleteDual` / `Audit` / `Stream` 均直接读取 `s.timeout`，race detector 必报。
+
+**修复**：`time.Duration` → `atomic.Int64`，所有读点改为 `time.Duration(s.timeout.Load())`。
+
+影响文件：`scheduler.go`, `stream.go`, `audit.go`
+
+#### 7.1.2 `s.promptInjector` 数据竞争
+
+**问题**：`SetPromptInjector()` 直接赋值指针，`ChatComplete` 等并发读取，无同步。
+
+**修复**：`*PromptInjector` → `atomic.Pointer[PromptInjector]`，读用 `.Load()`，写用 `.Store()`。
+
+影响文件：`scheduler.go`, `prompt.go`, `stream.go`, `audit.go`
+
+#### 7.1.3 `http.DefaultTransport` 类型断言 panic
+
+**问题**：`NewOpenAIProvider` 中 `http.DefaultTransport.(*http.Transport).Clone()` 若消费者替换默认 Transport 为非 `*http.Transport`，直接 panic。
+
+**修复**：改为 guarded type assertion：
+```go
+if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+    cloned := tr.Clone()
+    ...
+}
+```
+
+#### 7.1.4 `ChatCompleteStream` 生命周期不一致
+
+**问题**：
+1. 缺少 `checkClosed()`，Close 后仍可发起 Stream
+2. 无 `s.timeout` 包装，行为与其他方法不一致
+3. provider 不可用时返回 `fmt.Errorf("no available provider")` 而非 `ErrNoAvailableProvider`
+
+**修复**：统一添加 closed 检查、timeout 包装、sentinel error。
+
+#### 7.1.5 `ChatCompleteWithFallback` panic 时资源泄漏
+
+**问题**：内层循环中 `cancel()` 和 `sem.Release()` 不是 defer，provider panic 时两者均不执行，导致信号量永久泄漏。
+
+**修复**：重构为内层函数 + `defer recover/cancel/sem.Release`，并补全 retry 逻辑。
+
+#### 7.1.6 `ChatComplete` / `TestProvider` panic 无恢复
+
+**问题**：自定义 provider 若未实现 recover，panic 直接穿透到调用方。
+
+**修复**：在 `ChatComplete` 和 `TestProvider` 中分别添加 `defer recover()`，捕获后转为 error 返回。
+
+#### 7.1.7 `AvailableProviders` 缓存返回可变切片
+
+**问题**：消费者修改返回的 `[]Provider` 会直接污染内部缓存。
+
+**修复**：返回 `copyProviders()` 副本。
+
+### 7.2 P1 级可用性增强（已实施）
+
+#### 7.2.1 唯一请求 ID
+
+**问题**：`buildRecord` 使用 `start.UnixNano()` 生成 ID，高并发下同 provider 同一微秒可能冲突。
+
+**修复**：Scheduler 增加 `atomic.Uint64 reqID`，ID 格式改为 `%s-%d-%d`（provider + nanoseq + atomic counter）。
+
+#### 7.2.2 请求预验证 `Validate()`
+
+**新增**：`ChatCompletionRequest.Validate() []string`
+
+验证项：
+- Messages 非空
+- 每条 Message 的 Role / Content 非空
+- Temperature ∈ [0, 2]
+- TopP ∈ [0, 1]
+- MaxTokens ≥ 0
+
+调用方可提前拦截无效请求，减少无效 API 调用：
+```go
+if issues := req.Validate(); len(issues) > 0 {
+    return fmt.Errorf("invalid request: %v", issues)
+}
+```
+
+#### 7.2.3 安全内容访问 `Content()`
+
+**新增**：`ChatCompletionResponse.Content() string`
+
+返回第一个 Choice 的 Message.Content，自动处理 nil response 和空 Choices，避免调用方因直接访问 `resp.Choices[0]` 导致 panic。
+
+#### 7.2.4 Stream Usage 透传
+
+**新增**：`StreamCompletionResponse.Usage`
+
+在支持 `stream_options: {"include_usage": true}` 的 Provider（如 OpenAI）上，最终 chunk 会携带 Token 用量统计。`stream.go` 中从 `go-openai` 的 `response.Usage` 映射到 `core.Usage`。
+
+#### 7.2.5 防御性拷贝
+
+- `WithStop(stop []string)` 现在复制切片，防止调用方后续修改影响已构建的请求
+- `CostString` 不再修改本地 `Pricing` 副本，改为读取后使用局部变量
+
+#### 7.2.6 `NewScheduler` 过滤 nil provider
+
+**问题**：`NewClientWithProviders(nil)` 或 variadic slice 中含 nil 直接 panic。
+
+**修复**：`NewScheduler` 遍历中 `if p == nil { continue }`，只保留 valid providers。
+
+### 7.3 测试覆盖
+
+| 新增测试 | 验证目标 |
+|---|---|
+| `TestChatCompleteStream_Closed` | Stream 关闭后返回 `ErrSchedulerClosed` |
+| `TestChatCompleteStream_NoAvailableProvider` | Stream 无可用 provider 返回 sentinel error |
+| `TestSetTimeout_RaceSafe` | 100 并发 goroutine 同时 SetTimeout + ChatComplete，race 干净 |
+| `TestAvailableProviders_Copy` | 修改返回 slice 不影响缓存 |
+| `TestChatComplete_PanicRecovery` | panic 后 semaphore 释放，二次请求不挂死 |
+| `TestChatCompleteWithFallback_PanicRecovery` | fallback 路径 panic 后自动切换下一 provider |
+| `TestTestProvider_PanicRecovery` | 连通性测试 panic 优雅降级为 error |
+| `TestAudit_NoAvailableProvider` | Audit 无可用 provider 返回 `ErrNoAvailableProvider` |
+| `TestChatCompletionRequest_Validate` | 预验证拦截各类无效请求 |
+| `TestChatCompletionResponse_Content` | nil / 空 Choices / 正常内容 均安全 |
+| `TestWithStop_DefensiveCopy` | 原始 slice 修改不影响请求 |
+| `TestUsage_CostString_DefaultCurrency` | 空 Currency 时默认 CNY 且不修改入参 |
+
+### 7.4 变更统计（第三轮）
+
+| 类别 | 数量 |
+|---|---|
+| 修改文件 | 7 (`scheduler.go`, `stream.go`, `audit.go`, `prompt.go`, `providers.go`, `history.go`, `client.go` 无修改) |
+| 新增测试 | 12 |
+| 修复 Bug | 7（数据竞争 ×2、panic 风险 ×2、资源泄漏、错误不一致、缓存污染） |
+| 可用性增强 | 6（Validate、Content、Stream Usage、唯一 ID、防御拷贝、nil 过滤） |
+| 编译状态 | ✅ 通过 |
+| 测试状态 | ✅ 49/49 通过，`-race` 干净 |
+

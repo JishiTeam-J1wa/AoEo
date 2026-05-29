@@ -11,8 +11,10 @@ import (
 )
 
 var (
-	reMarkdownFence = regexp.MustCompile("(?s)```(?:json)?\\s*\\n?(.*?)\\n?```")
-	fieldRegexCache sync.Map // map[string]*regexp.Regexp
+	reMarkdownFence    = regexp.MustCompile("(?s)```(?:json)?\\s*\\n?(.*?)\\n?```")
+	fieldRegexCache    = make(map[string]*regexp.Regexp)
+	fieldRegexCacheMu  sync.RWMutex
+	fieldRegexCacheMax = 100
 )
 
 // ExtractJSON extracts a JSON object from the content using multiple strategies:
@@ -87,12 +89,21 @@ func findFirstJSONObject(content string) string {
 
 // ExtractField extracts a string field using regex fallback.
 func ExtractField(content, fieldName string) string {
-	re, ok := fieldRegexCache.Load(fieldName)
+	fieldRegexCacheMu.RLock()
+	re, ok := fieldRegexCache[fieldName]
+	fieldRegexCacheMu.RUnlock()
+
 	if !ok {
 		re = regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(fieldName) + `"\s*:\s*"(.*?)(?:"|,|\s*})`)
-		fieldRegexCache.Store(fieldName, re)
+		fieldRegexCacheMu.Lock()
+		if len(fieldRegexCache) >= fieldRegexCacheMax {
+			fieldRegexCache = make(map[string]*regexp.Regexp)
+		}
+		fieldRegexCache[fieldName] = re
+		fieldRegexCacheMu.Unlock()
 	}
-	matches := re.(*regexp.Regexp).FindStringSubmatch(content)
+
+	matches := re.FindStringSubmatch(content)
 	if len(matches) >= 2 {
 		return matches[1]
 	}

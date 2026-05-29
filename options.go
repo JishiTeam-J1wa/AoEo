@@ -46,10 +46,51 @@ func WithModel(model string) Option {
 	}
 }
 
+// WithTopP sets the nucleus sampling parameter.
+func WithTopP(p float32) Option {
+	return func(req *core.ChatCompletionRequest) {
+		req.TopP = p
+	}
+}
+
+// WithPresencePenalty sets the presence penalty.
+func WithPresencePenalty(p float32) Option {
+	return func(req *core.ChatCompletionRequest) {
+		req.PresencePenalty = p
+	}
+}
+
+// WithFrequencyPenalty sets the frequency penalty.
+func WithFrequencyPenalty(p float32) Option {
+	return func(req *core.ChatCompletionRequest) {
+		req.FrequencyPenalty = p
+	}
+}
+
+// WithStop sets the stop sequences.
+func WithStop(stop []string) Option {
+	return func(req *core.ChatCompletionRequest) {
+		if len(stop) > 0 {
+			copied := make([]string, len(stop))
+			copy(copied, stop)
+			req.Stop = copied
+		}
+	}
+}
+
+// WithSeed sets the seed for deterministic sampling.
+func WithSeed(seed int) Option {
+	return func(req *core.ChatCompletionRequest) {
+		req.Seed = &seed
+	}
+}
+
 // BuildRequest creates a ChatCompletionRequest from messages and options.
 func BuildRequest(messages []core.Message, opts ...Option) core.ChatCompletionRequest {
+	copied := make([]core.Message, len(messages))
+	copy(copied, messages)
 	req := core.ChatCompletionRequest{
-		Messages: messages,
+		Messages: copied,
 	}
 	for _, opt := range opts {
 		opt(&req)

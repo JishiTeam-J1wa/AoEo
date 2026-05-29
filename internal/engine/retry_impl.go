@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
@@ -12,6 +13,11 @@ import (
 func DoRetry(ctx context.Context, cfg core.RetryConfig, fn func() error) error {
 	if cfg.MaxRetries <= 0 {
 		return fn()
+	}
+	// Guard against negative MaxRetries.
+	maxRetries := cfg.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
 
 	baseDelay := cfg.BaseDelay
@@ -35,31 +41,35 @@ func DoRetry(ctx context.Context, cfg core.RetryConfig, fn func() error) error {
 	var lastErr error
 	delay := baseDelay
 
-	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		err := fn()
 		if err == nil {
 			return nil
 		}
 		lastErr = err
 
-		if attempt == cfg.MaxRetries {
+		if attempt == maxRetries {
 			break
 		}
 		if !retryable(err) {
 			return err
 		}
 
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return fmt.Errorf("retry cancelled: %w", ctx.Err())
-		case <-time.After(delay):
+		case <-timer.C:
 		}
 
-		delay = time.Duration(float64(delay) * multiplier)
+		// Exponential backoff with 30% jitter to avoid thundering herd.
+		jitter := 1.0 + rand.Float64()*0.3
+		delay = time.Duration(float64(delay) * multiplier * jitter)
 		if delay > maxDelay {
 			delay = maxDelay
 		}
 	}
 
-	return fmt.Errorf("failed after %d retries, last error: %w", cfg.MaxRetries, lastErr)
+	return fmt.Errorf("failed after %d retries, last error: %w", maxRetries, lastErr)
 }

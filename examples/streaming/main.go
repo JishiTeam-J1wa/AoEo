@@ -45,11 +45,15 @@ func main() {
 	for chunk := range stream {
 		if chunk.Err != nil {
 			log.Printf("\n[Stream Error: %v]\n", chunk.Err)
-			break
+			return
 		}
 		if chunk.Chunk.FinishReason != "" {
 			fmt.Printf("\n[Finish: %s]\n", chunk.Chunk.FinishReason)
-			break
+			if chunk.Usage.TotalTokens > 0 {
+				fmt.Printf("[Usage] %d prompt, %d completion, %d total\n",
+					chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
+			}
+			continue
 		}
 		fmt.Print(chunk.Chunk.Delta.Content)
 	}

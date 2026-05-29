@@ -56,7 +56,7 @@ resp, err := aoeoClient.ChatComplete(ctx, req)
 if err != nil {
     return err
 }
-content := resp.Choices[0].Message.Content
+content := resp.Content()
 ```
 
 **升级 Fallback**：只需把 `ChatComplete` 改成 `ChatCompleteWithFallback`，并添加第二个 Provider：
@@ -133,7 +133,7 @@ func main() {
         }
 
         c.JSON(200, gin.H{
-            "content": resp.Choices[0].Message.Content,
+            "content": resp.Content(),
             "usage": gin.H{
                 "prompt":     resp.Usage.PromptTokens,
                 "completion": resp.Usage.CompletionTokens,
@@ -405,7 +405,7 @@ func (a *aoEoAdapter) Complete(ctx context.Context, prompt string) (string, erro
     if err != nil {
         return "", err
     }
-    return resp.Choices[0].Message.Content, nil
+    return resp.Content(), nil
 }
 
 func (a *aoEoAdapter) CompleteStream(ctx context.Context, prompt string) (<-chan string, error) {

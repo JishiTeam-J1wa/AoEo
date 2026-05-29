@@ -2,8 +2,10 @@ package aoeo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
 	"github.com/JishiTeam-J1wa/AoEo/internal/engine"
@@ -12,59 +14,59 @@ import (
 
 // Type aliases for backward compatibility.
 type (
-	ChatCompletionRequest      = core.ChatCompletionRequest
-	ChatCompletionResponse     = core.ChatCompletionResponse
-	Message                    = core.Message
-	Choice                     = core.Choice
-	Usage                      = core.Usage
-	ModelInfo                  = core.ModelInfo
-	ResponseFormat             = core.ResponseFormat
-	StreamChunk                = core.StreamChunk
-	StreamCompletionResponse   = core.StreamCompletionResponse
-	DualResult                 = core.DualResult
-	AuditResult                = core.AuditResult
-	ProviderStatus             = core.ProviderStatus
-	Pricing                    = core.Pricing
-	Config                     = core.Config
-	ProviderConfig             = core.ProviderConfig
-	RetryConfig                = core.RetryConfig
-	EventEmitter               = core.EventEmitter
-	NopEmitter                 = core.NopEmitter
-	Logger                     = core.Logger
-	CallRecord                 = engine.CallRecord
-	ProviderStats              = engine.ProviderStats
-	History                    = engine.History
-	PromptTemplate             = engine.PromptTemplate
-	PromptInjector             = engine.PromptInjector
-	Scheduler                  = engine.Scheduler
-	SchedulerOption            = engine.SchedulerOption
-	Provider                   = providers.Provider
+	ChatCompletionRequest    = core.ChatCompletionRequest
+	ChatCompletionResponse   = core.ChatCompletionResponse
+	Message                  = core.Message
+	Choice                   = core.Choice
+	Usage                    = core.Usage
+	ModelInfo                = core.ModelInfo
+	ResponseFormat           = core.ResponseFormat
+	StreamChunk              = core.StreamChunk
+	StreamCompletionResponse = core.StreamCompletionResponse
+	DualResult               = core.DualResult
+	AuditResult              = core.AuditResult
+	ProviderStatus           = core.ProviderStatus
+	Pricing                  = core.Pricing
+	Config                   = core.Config
+	ProviderConfig           = core.ProviderConfig
+	RetryConfig              = core.RetryConfig
+	EventEmitter             = core.EventEmitter
+	NopEmitter               = core.NopEmitter
+	Logger                   = core.Logger
+	CallRecord               = engine.CallRecord
+	ProviderStats            = engine.ProviderStats
+	History                  = engine.History
+	PromptTemplate           = engine.PromptTemplate
+	PromptInjector           = engine.PromptInjector
+	Scheduler                = engine.Scheduler
+	SchedulerOption          = engine.SchedulerOption
+	Provider                 = providers.Provider
 )
 
 // Convenience re-exports.
 var (
-	NewHistory           = engine.NewHistory
-	NewPromptInjector    = engine.NewPromptInjector
-	SetLogger            = core.SetLogger
-	GetLogger            = core.GetLogger
-	DefaultPricing       = core.DefaultPricing
-	DefaultRetryConfig   = core.DefaultRetryConfig
-	IsRetryableError     = core.IsRetryableError
-	ValidateConfig       = core.ValidateConfig
-	ExtractJSON          = engine.ExtractJSON
-	ExtractField         = engine.ExtractField
-	MergeChoices         = engine.MergeChoices
-	Consensus            = engine.Consensus
-	ParseSSE             = engine.ParseSSE
-	CreateProvider       = engine.CreateProvider
-	NewScheduler         = engine.NewScheduler
+	NewHistory              = engine.NewHistory
+	NewPromptInjector       = engine.NewPromptInjector
+	SetLogger               = core.SetLogger
+	GetLogger               = core.GetLogger
+	DefaultPricing          = core.DefaultPricing
+	DefaultRetryConfig      = core.DefaultRetryConfig
+	IsRetryableError        = core.IsRetryableError
+	ValidateConfig          = core.ValidateConfig
+	ExtractJSON             = engine.ExtractJSON
+	ExtractField            = engine.ExtractField
+	MergeChoices            = engine.MergeChoices
+	Consensus               = engine.Consensus
+	ParseSSE                = engine.ParseSSE
+	CreateProvider          = engine.CreateProvider
+	NewScheduler            = engine.NewScheduler
 	NewSchedulerWithOptions = engine.NewSchedulerWithOptions
-	NewDeepSeekProvider  = providers.NewDeepSeekProvider
-	NewKimiProvider      = providers.NewKimiProvider
-	NewGLMProvider       = providers.NewGLMProvider
-	NewQwenProvider      = providers.NewQwenProvider
-	NewOpenAIProvider    = providers.NewOpenAIProvider
-	NewBaseProvider      = providers.NewBaseProvider
+	NewDeepSeekProvider     = providers.NewDeepSeekProvider
+	NewKimiProvider         = providers.NewKimiProvider
+	NewGLMProvider          = providers.NewGLMProvider
+	NewQwenProvider         = providers.NewQwenProvider
+	NewOpenAIProvider       = providers.NewOpenAIProvider
+	NewBaseProvider         = providers.NewBaseProvider
 )
 
 // WithXxx options re-exported from engine.
@@ -84,6 +86,16 @@ const (
 	EventProviderRecover = core.EventProviderRecover
 	EventFallbackTrigger = core.EventFallbackTrigger
 	EventAuditDisagree   = core.EventAuditDisagree
+	EventDualComplete    = core.EventDualComplete
+)
+
+// Sentinel errors re-exported for SDK consumers.
+var (
+	ErrSchedulerClosed          = engine.ErrSchedulerClosed
+	ErrNoAvailableProvider      = engine.ErrNoAvailableProvider
+	ErrProviderNotFound         = engine.ErrProviderNotFound
+	ErrAllProvidersFailed       = engine.ErrAllProvidersFailed
+	ErrProviderConfigIncomplete = engine.ErrProviderConfigIncomplete
 )
 
 // Client is the high-level entry point for AoEo.
@@ -158,23 +170,23 @@ func (c *Client) ChatComplete(ctx context.Context, req core.ChatCompletionReques
 
 // ChatCompleteWithFallback tries primary provider first, then falls back.
 func (c *Client) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
-	available := c.scheduler.AvailableProviders()
-	if len(available) > 0 {
-		primary := available[0]
-		resp, err := c.scheduler.ChatCompleteWithFallback(ctx, req)
-		if err != nil {
-			c.emit(core.EventFallbackTrigger, fmt.Sprintf("all providers failed, primary %s: %v", primary.Name(), err))
-		} else if resp != nil && primary.Name() != resp.Model && len(available) > 1 {
-			c.emit(core.EventFallbackTrigger, fmt.Sprintf("fallback activated: %s -> %s", primary.Name(), resp.Model))
+	resp, err := c.scheduler.ChatCompleteWithFallback(ctx, req)
+	if err != nil && errors.Is(err, engine.ErrAllProvidersFailed) {
+		if available := c.scheduler.AvailableProviders(); len(available) > 0 {
+			c.emit(core.EventFallbackTrigger, fmt.Sprintf("all providers failed, primary %s: %v", available[0].Name(), err))
 		}
-		return resp, err
 	}
-	return c.scheduler.ChatCompleteWithFallback(ctx, req)
+	return resp, err
 }
 
 // ChatCompleteDual sends the request to two different providers concurrently.
 func (c *Client) ChatCompleteDual(ctx context.Context, req core.ChatCompletionRequest) (*core.DualResult, error) {
-	return c.scheduler.ChatCompleteDual(ctx, req)
+	result, err := c.scheduler.ChatCompleteDual(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	c.emit(core.EventDualComplete, result.Consensus)
+	return result, nil
 }
 
 // ChatCompleteStream performs a streaming chat completion.
@@ -207,9 +219,19 @@ func (c *Client) SetPromptInjector(pi *engine.PromptInjector) {
 	c.scheduler.SetPromptInjector(pi)
 }
 
-// Close gracefully shuts down the client.
+// Close gracefully shuts down the client. It is safe to call multiple times.
 func (c *Client) Close() error {
 	return c.scheduler.Close()
+}
+
+// IsClosed reports whether the client has been closed.
+func (c *Client) IsClosed() bool {
+	return c.scheduler.IsClosed()
+}
+
+// SetTimeout updates the per-provider request timeout at runtime.
+func (c *Client) SetTimeout(d time.Duration) {
+	c.scheduler.SetTimeout(d)
 }
 
 // Scheduler returns the underlying scheduler for advanced use.
@@ -219,5 +241,12 @@ func (c *Client) Scheduler() *engine.Scheduler {
 
 // Audit performs a secondary completion using a different provider and compares results.
 func (c *Client) Audit(ctx context.Context, req core.ChatCompletionRequest) (*core.AuditResult, error) {
-	return c.scheduler.Audit(ctx, req)
+	result, err := c.scheduler.Audit(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Consensus {
+		c.emit(core.EventAuditDisagree, result.Primary.Model, result.Audit.Model)
+	}
+	return result, nil
 }

@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ModelInfo holds basic info about an available model.
 type ModelInfo struct {
@@ -24,13 +27,46 @@ type Message struct {
 
 // ChatCompletionRequest is the unified request type for all providers.
 type ChatCompletionRequest struct {
-	Model          string         `json:"model"`
-	Messages       []Message      `json:"messages"`
-	Temperature    float32        `json:"temperature,omitempty"`
-	MaxTokens      int            `json:"max_tokens,omitempty"`
-	ResponseFormat ResponseFormat `json:"response_format,omitempty"`
-	Stream         bool           `json:"stream,omitempty"`
-	Tags           []string       `json:"tags,omitempty"` // Optional tags for filtering/categorizing calls in history
+	Model            string         `json:"model"`
+	Messages         []Message      `json:"messages"`
+	Temperature      float32        `json:"temperature,omitempty"`
+	MaxTokens        int            `json:"max_tokens,omitempty"`
+	TopP             float32        `json:"top_p,omitempty"`
+	PresencePenalty  float32        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty float32        `json:"frequency_penalty,omitempty"`
+	Stop             []string       `json:"stop,omitempty"`
+	Seed             *int           `json:"seed,omitempty"`
+	ResponseFormat   ResponseFormat `json:"response_format,omitempty"`
+	Stream           bool           `json:"stream,omitempty"`
+	Tags             []string       `json:"tags,omitempty"` // Optional tags for filtering/categorizing calls in history
+}
+
+// Validate checks the request for common misconfigurations.
+// Returns a slice of error messages; empty slice means valid.
+func (req ChatCompletionRequest) Validate() []string {
+	var issues []string
+	if len(req.Messages) == 0 {
+		issues = append(issues, "messages cannot be empty")
+	}
+	for i, m := range req.Messages {
+		if m.Role == "" {
+			issues = append(issues, fmt.Sprintf("message[%d]: role is required", i))
+		}
+		if m.Content == "" && m.Role != "assistant" {
+			// assistant messages can be empty (e.g. tool calls), but user/system should have content
+			issues = append(issues, fmt.Sprintf("message[%d]: content is required", i))
+		}
+	}
+	if req.Temperature < 0 || req.Temperature > 2 {
+		issues = append(issues, "temperature must be between 0 and 2")
+	}
+	if req.TopP < 0 || req.TopP > 1 {
+		issues = append(issues, "top_p must be between 0 and 1")
+	}
+	if req.MaxTokens < 0 {
+		issues = append(issues, "max_tokens must be >= 0")
+	}
+	return issues
 }
 
 // ResponseFormat controls the output format (e.g. JSON object).
@@ -45,6 +81,15 @@ type ChatCompletionResponse struct {
 	Choices   []Choice  `json:"choices"`
 	Usage     Usage     `json:"usage"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Content returns the content of the first choice, or empty string if none.
+// This is a safe convenience accessor that avoids index-out-of-bounds panics.
+func (r *ChatCompletionResponse) Content() string {
+	if r == nil || len(r.Choices) == 0 {
+		return ""
+	}
+	return r.Choices[0].Message.Content
 }
 
 // Choice represents a single completion choice.
@@ -73,6 +118,9 @@ type StreamCompletionResponse struct {
 	ID    string      `json:"id"`
 	Model string      `json:"model"`
 	Chunk StreamChunk `json:"chunk"`
+	// Usage is set only on the final chunk when the provider supports it
+	// (e.g. OpenAI with stream_options: {"include_usage": true}).
+	Usage Usage `json:"usage,omitempty"`
 	// Err is set when the stream encounters a non-EOF error.
 	// When Err is non-nil, the channel will be closed immediately after.
 	Err error `json:"-"`
@@ -93,13 +141,16 @@ type AuditResult struct {
 	Adjusted  *ChatCompletionResponse `json:"adjusted"`
 }
 
-// Clone creates a deep copy of the request, including Messages.
+// Clone creates a deep copy of the request, including Messages and Tags.
 func (req ChatCompletionRequest) Clone() ChatCompletionRequest {
-	if len(req.Messages) == 0 {
-		return req
-	}
 	cloned := req
-	cloned.Messages = make([]Message, len(req.Messages))
-	copy(cloned.Messages, req.Messages)
+	if len(req.Messages) > 0 {
+		cloned.Messages = make([]Message, len(req.Messages))
+		copy(cloned.Messages, req.Messages)
+	}
+	if len(req.Tags) > 0 {
+		cloned.Tags = make([]string, len(req.Tags))
+		copy(cloned.Tags, req.Tags)
+	}
 	return cloned
 }

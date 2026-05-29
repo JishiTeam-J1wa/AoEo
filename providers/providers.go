@@ -86,13 +86,21 @@ func (b *BaseProvider) RecordSuccess() {
 	}
 }
 
-// RecordFailure increments the failure counter and triggers cooldown after 3 consecutive failures.
+// RecordFailure increments the failure counter and triggers cooldown after MaxFailures consecutive failures.
 func (b *BaseProvider) RecordFailure() {
 	b.failMu.Lock()
 	b.failCount++
+	maxFailures := b.config.MaxFailures
+	if maxFailures <= 0 {
+		maxFailures = 3
+	}
+	cooldown := b.config.CooldownDuration
+	if cooldown <= 0 {
+		cooldown = 60 * time.Second
+	}
 	opened := false
-	if b.failCount >= 3 {
-		b.failUntil = time.Now().Add(60 * time.Second)
+	if b.failCount >= maxFailures {
+		b.failUntil = time.Now().Add(cooldown)
 		opened = true
 		core.GetLogger().Warn("circuit breaker opened",
 			"provider", b.config.Name,
@@ -191,10 +199,11 @@ func NewOpenAIProvider(config core.ProviderConfig) *OpenAIProvider {
 	oc := openai.DefaultConfig(config.APIKey)
 	oc.BaseURL = config.Endpoint
 	if config.SkipTLSVerify {
-		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+			cloned := tr.Clone()
+			cloned.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+			oc.HTTPClient = &http.Client{Transport: cloned}
 		}
-		oc.HTTPClient = &http.Client{Transport: tr}
 	}
 
 	return &OpenAIProvider{
@@ -245,23 +254,26 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 		}
 	}
 
-	resp, err := p.Client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:          req.Model,
-		Messages:       messages,
-		Temperature:    req.Temperature,
-		MaxTokens:      req.MaxTokens,
-		ResponseFormat: respFormat,
-	})
+	streamReq := openai.ChatCompletionRequest{
+		Model:            req.Model,
+		Messages:         messages,
+		Temperature:      req.Temperature,
+		MaxTokens:        req.MaxTokens,
+		TopP:             req.TopP,
+		PresencePenalty:  req.PresencePenalty,
+		FrequencyPenalty: req.FrequencyPenalty,
+		Stop:             req.Stop,
+		Seed:             req.Seed,
+		ResponseFormat:   respFormat,
+		Stream:           req.Stream,
+	}
+	resp, err := p.Client.CreateChatCompletion(ctx, streamReq)
 	if err != nil {
 		// Compatibility retry: some providers (e.g. Kimi kimi-k2.6) only accept temperature=1.
 		// If error mentions temperature, retry without setting it (omitted field defaults to 1).
-		if isTemperatureError(err) && req.Temperature != 0 {
-			resp, err = p.Client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-				Model:          req.Model,
-				Messages:       messages,
-				MaxTokens:      req.MaxTokens,
-				ResponseFormat: respFormat,
-			})
+		if isTemperatureError(err) && req.Temperature != 1 {
+			streamReq.Temperature = 0 // omitempty will drop it
+			resp, err = p.Client.CreateChatCompletion(ctx, streamReq)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s chat complete: %w", p.Name(), err)
@@ -377,6 +389,10 @@ func NewQwenProvider(config core.ProviderConfig) Provider {
 	}
 	return NewOpenAIProvider(config)
 }
+
+// Close releases any resources held by the provider.
+// The default implementation is a no-op; override in concrete providers if needed.
+func (b *BaseProvider) Close() error { return nil }
 
 // FailUntil returns the circuit breaker cooldown deadline (zero if not active).
 func (b *BaseProvider) FailUntil() time.Time {

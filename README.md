@@ -69,7 +69,7 @@ func main() {
         log.Fatal(err)
     }
 
-    fmt.Println(resp.Choices[0].Message.Content)
+    fmt.Println(resp.Content())
 }
 ```
 
@@ -111,6 +111,7 @@ cfg := aoeo.Config{
 
 ```go
 resp, err := client.ChatCompleteWithFallback(ctx, req)
+// resp.Content() 安全访问第一个 Choice 的内容（自动处理 nil / 空 Choices）
 ```
 
 每次尝试前获取信号量许可，失败时释放。适合生产环境的高可用场景。
@@ -122,6 +123,7 @@ resp, err := client.ChatCompleteWithFallback(ctx, req)
 ```go
 dual, err := client.ChatCompleteDual(ctx, req)
 fmt.Printf("Consensus: %v\n", dual.Consensus)
+// dual.Result1.Content() 和 dual.Result2.Content() 安全访问内容
 ```
 
 ### 4. 审计模式（Audit）
@@ -133,6 +135,7 @@ result, err := client.Audit(ctx, req)
 if !result.Consensus {
     fmt.Println("⚠️ 结果不一致，建议人工复核")
 }
+// result.Primary.Content() / result.Audit.Content() 安全访问
 ```
 
 ### 5. SSE 流式响应
@@ -144,6 +147,8 @@ for chunk := range stream {
         log.Fatal(chunk.Err)
     }
     if chunk.Chunk.FinishReason != "" {
+        // 最终 chunk 可能携带 Usage（若 Provider 支持）
+        fmt.Printf("Tokens: %d total\n", chunk.Usage.TotalTokens)
         break
     }
     fmt.Print(chunk.Chunk.Delta.Content)
@@ -190,6 +195,10 @@ cfg.Providers[0].Pricing = aoeo.Pricing{
 // 每次调用自动计算成本
 resp, _ := client.ChatComplete(ctx, req)
 cost := resp.Usage.Cost(pricing)  // 0.38 CNY
+
+// 安全访问内容（自动处理 nil / 空 Choices）
+content := resp.Content()
+_ = content
 
 // 按 Provider 聚合统计
 for name, s := range client.Stats() {
@@ -242,6 +251,8 @@ client.SetEmitter(&MyEmitter{})
 3. **Stream 退出**：消费端提前 break 时，应同时 `cancel()` context
 4. **Graceful Shutdown**：始终 `defer client.Close()`
 5. **日志级别**：生产环境建议设置 `slog.LevelWarn`
+6. **请求预验证**：发送前调用 `req.Validate()` 提前拦截参数错误
+7. **Nil 安全访问**：优先使用 `resp.Content()` 代替 `resp.Choices[0].Message.Content`
 
 ---
 
@@ -278,10 +289,9 @@ AoEo/
 │   └── list_models/
 ├── README.md
 ├── DESIGN.md
-├── INTEGRATION.md
 ├── AUDIT_REPORT.md
 ├── LICENSE
-└── aoeo_test.go       # 32 个单元测试（含 Race Detector）
+└── aoeo_test.go       # 49 个单元测试（含 Race Detector）
 ```
 
 ---
@@ -294,6 +304,10 @@ AoEo/
 - [x] Prompt 注入系统
 - [x] 结构化日志
 - [x] 优雅关闭
+- [x] 全路径 panic 恢复 + 信号量防泄漏
+- [x] 请求预验证 `Validate()`
+- [x] 安全访问器 `Content()`
+- [x] Stream Usage 透传
 
 ### Phase 3 — 网络增强
 - [ ] **定向 AI API 代理**

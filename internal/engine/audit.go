@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
 	"github.com/JishiTeam-J1wa/AoEo/providers"
@@ -11,10 +12,13 @@ import (
 // Audit performs a secondary completion using a different provider and compares results.
 // It requires at least 2 available providers in the scheduler.
 func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (*core.AuditResult, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
 	// Identify primary provider explicitly so we can compare by name later.
 	available := s.AvailableProviders()
 	if len(available) == 0 {
-		return nil, fmt.Errorf("no available provider")
+		return nil, ErrNoAvailableProvider
 	}
 	if len(available) < 2 {
 		return nil, fmt.Errorf("audit requires at least 2 available providers, got %d", len(available))
@@ -25,9 +29,14 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 	if reqCopy.Model == "" {
 		reqCopy.Model = primaryProvider.Config().Model
 	}
+	if pi := s.promptInjector.Load(); pi != nil {
+		pi.Inject(primaryProvider.Name(), reqCopy.Model, &reqCopy)
+	}
 
-	auditCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	auditCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
 	defer cancel()
+
+	start := time.Now()
 
 	// Get primary result.
 	if err := s.sem.Acquire(auditCtx); err != nil {
@@ -58,15 +67,20 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 	}
 
 	var auditResp *core.ChatCompletionResponse
+	var auditErr error
+	var auditReqCopy core.ChatCompletionRequest
 	if auditProvider != nil {
-		auditReqCopy := req.Clone()
+		auditReqCopy = req.Clone()
 		if auditReqCopy.Model == "" {
 			auditReqCopy.Model = auditProvider.Config().Model
+		}
+		if pi := s.promptInjector.Load(); pi != nil {
+			pi.Inject(auditProvider.Name(), auditReqCopy.Model, &auditReqCopy)
 		}
 		if err := s.sem.Acquire(auditCtx); err != nil {
 			return nil, err
 		}
-		auditResp, err = func() (result *core.ChatCompletionResponse, err error) {
+		auditResp, auditErr = func() (result *core.ChatCompletionResponse, err error) {
 			defer func() {
 				if r := recover(); r != nil {
 					core.GetLogger().Error("audit secondary panic recovered", "panic", r)
@@ -77,8 +91,8 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 			return
 		}()
 		s.sem.Release()
-		if err != nil {
-			core.GetLogger().Warn("audit completion failed", "error", err)
+		if auditErr != nil {
+			core.GetLogger().Warn("audit completion failed", "error", auditErr)
 		}
 	}
 
@@ -98,6 +112,13 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 	} else {
 		result.Adjusted = primary
 		result.Consensus = true // No audit available, assume primary is correct.
+	}
+
+	if s.history != nil {
+		s.history.Record(s.buildRecord(primaryProvider, reqCopy, primary, start, nil, append(req.Tags, "audit"), ""))
+		if auditProvider != nil {
+			s.history.Record(s.buildRecord(auditProvider, auditReqCopy, auditResp, start, auditErr, append(req.Tags, "audit"), ""))
+		}
 	}
 
 	return result, nil
