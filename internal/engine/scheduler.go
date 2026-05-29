@@ -183,6 +183,7 @@ func (s *Scheduler) checkClosed() error {
 
 // Close marks the scheduler as closed and attempts to close all providers
 // that implement io.Closer. It is safe to call multiple times (idempotent).
+// If any provider close fails, the first error is returned.
 func (s *Scheduler) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
@@ -195,12 +196,15 @@ func (s *Scheduler) Close() error {
 	allProvs := s.providers
 	s.mu.RUnlock()
 
+	var firstErr error
 	for _, p := range allProvs {
 		if c, ok := p.(interface{ Close() error }); ok {
-			c.Close()
+			if err := c.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // ChatComplete performs a chat completion using the primary (first available) provider.
@@ -225,7 +229,12 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 	}
 
 	// Apply prompt injection if configured.
+	// Clone to avoid mutating the caller's original Messages slice.
 	if pi := s.promptInjector.Load(); pi != nil {
+		reqCopy = req.Clone()
+		if reqCopy.Model == "" {
+			reqCopy.Model = p.Config().Model
+		}
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
@@ -280,6 +289,10 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 			reqCopy.Model = p.Config().Model
 		}
 		if pi := s.promptInjector.Load(); pi != nil {
+			reqCopy = req.Clone()
+			if reqCopy.Model == "" {
+				reqCopy.Model = p.Config().Model
+			}
 			pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 		}
 
@@ -414,15 +427,21 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 
 	// Record history for both.
 	if s.history != nil {
-		req1 := req
+		req1 := req.Clone()
 		if req1.Model == "" {
 			req1.Model = p1.Config().Model
 		}
+		if pi := s.promptInjector.Load(); pi != nil {
+			pi.Inject(p1.Name(), req1.Model, &req1)
+		}
 		s.history.Record(s.buildRecord(p1, req1, o1.resp, start, o1.err, append(req.Tags, "dual"), ""))
 
-		req2 := req
+		req2 := req.Clone()
 		if req2.Model == "" {
 			req2.Model = p2.Config().Model
+		}
+		if pi := s.promptInjector.Load(); pi != nil {
+			pi.Inject(p2.Name(), req2.Model, &req2)
 		}
 		s.history.Record(s.buildRecord(p2, req2, o2.resp, start, o2.err, append(req.Tags, "dual"), ""))
 	}

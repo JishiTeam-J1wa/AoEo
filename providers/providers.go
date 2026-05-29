@@ -128,14 +128,12 @@ func (b *BaseProvider) IsAvailable() bool {
 	b.failMu.Lock()
 	cooldown := b.failUntil.After(time.Now())
 	b.failMu.Unlock()
-	if cooldown {
-		return false
-	}
-	return true
+	return !cooldown
 }
 
 // ListModels fetches the list of available models from the provider via the
 // OpenAI-compatible /models endpoint.
+// Note: this creates a temporary client; for connection reuse, use OpenAIProvider.ListModels.
 func (b *BaseProvider) ListModels(ctx context.Context) ([]core.ModelInfo, error) {
 	if b.config.APIKey == "" || b.config.Endpoint == "" {
 		return nil, fmt.Errorf("provider %s config incomplete", b.config.Name)
@@ -152,7 +150,7 @@ func (b *BaseProvider) ListModels(ctx context.Context) ([]core.ModelInfo, error)
 		return nil, fmt.Errorf("list models from %s: %w", b.config.Name, err)
 	}
 
-	var result []core.ModelInfo
+	result := make([]core.ModelInfo, 0, len(models.Models))
 	for _, m := range models.Models {
 		result = append(result, core.ModelInfo{ID: m.ID, OwnedBy: m.OwnedBy})
 	}
@@ -203,6 +201,13 @@ func NewOpenAIProvider(config core.ProviderConfig) *OpenAIProvider {
 			cloned := tr.Clone()
 			cloned.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 			oc.HTTPClient = &http.Client{Transport: cloned}
+		}
+	}
+
+	// Add sensible HTTP client timeouts to prevent indefinite hangs.
+	if oc.HTTPClient == nil {
+		oc.HTTPClient = &http.Client{
+			Timeout: 120 * time.Second,
 		}
 	}
 
@@ -300,6 +305,9 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
+	}
+	if resp.Created > 0 {
+		result.CreatedAt = time.Unix(resp.Created, 0)
 	}
 	return result, nil
 }

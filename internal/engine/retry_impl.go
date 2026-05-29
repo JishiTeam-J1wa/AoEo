@@ -11,13 +11,9 @@ import (
 
 // doRetry executes fn with exponential backoff retries.
 func DoRetry(ctx context.Context, cfg core.RetryConfig, fn func() error) error {
-	if cfg.MaxRetries <= 0 {
-		return fn()
-	}
-	// Guard against negative MaxRetries.
 	maxRetries := cfg.MaxRetries
-	if maxRetries < 0 {
-		maxRetries = 0
+	if maxRetries <= 0 {
+		return fn()
 	}
 
 	baseDelay := cfg.BaseDelay

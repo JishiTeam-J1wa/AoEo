@@ -38,6 +38,10 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 
 	// Apply prompt injection if configured.
 	if pi := s.promptInjector.Load(); pi != nil {
+		reqCopy = req.Clone()
+		if reqCopy.Model == "" {
+			reqCopy.Model = p.Config().Model
+		}
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
