@@ -1,97 +1,174 @@
-# AoEo — 多模型聚合调度 SDK for Go
+<div align="center">
 
-[![Go Version](https://img.shields.io/badge/go-%3E%3D1.22-blue)](https://golang.org)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+# ⚡ AoEo
 
-**AoEo** (Aggregation of Everything Open) 是一个用于聚合多种 OpenAI-compatible 大模型 API 的 Go SDK。它提供统一的调用接口、自动熔断降级、并发限流、计费统计、Prompt 注入和交叉审计能力，让你用 10 行代码获得生产级的多模型调度能力。
+**Aggregated AI Provider SDK for Go**
 
-> **设计哲学**：只做多 Provider 聚合调度，不做 Prompt 模板管理、对话历史、RAG 等上层抽象。保持极简，易于嵌入任何项目。
+[![Go](https://img.shields.io/badge/Go-%3E%3D1.22-00ADD8?logo=go&logoColor=white)](https://golang.org)
+[![Tests](https://img.shields.io/badge/tests-32%20passing-success)](./aoeo_test.go)
+[![Race Detector](https://img.shields.io/badge/race-clean-brightgreen)](./)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![DeepSeek](https://img.shields.io/badge/DeepSeek-✓-1D5CFE)](https://deepseek.com)
+[![Kimi](https://img.shields.io/badge/Kimi-✓-FF6B6B)](https://moonshot.cn)
 
----
+> *生产级多模型聚合调度 SDK —— 用 10 行代码获得高可用 LLM 调用能力*
 
-## 特性一览
+[快速开始](#-快速开始) · [功能特性](#-功能特性) · [架构设计](#-架构设计) · [集成指南](INTEGRATION.md) · [API 文档](DESIGN.md)
 
-| 特性 | 说明 |
-|---|---|
-| 🔄 **多 Provider 聚合** | DeepSeek / Kimi / GLM / Qwen / Claude / 任意 OpenAI-compatible API |
-| ⚡ **自动 Fallback** | 主 Provider 失败时自动切换到备用，支持多轮重试 |
-| 🛡️ **熔断器** | 连续 3 次失败自动冷却 60 秒，恢复后自动复位 |
-| 🔒 **并发限流** | 自适应信号量，容量 = Σ(Provider.MaxConcurrent)，防止配额耗尽 |
-| 📊 **双模型验证** | Dual 模式并发调用两个模型，Consensus 判断结果一致性 |
-| 🔍 **审计模式** | Audit 串行调用两个模型，交叉验证并合并结果 |
-| 📡 **SSE 流式** | 原生 Streaming 支持，逐字返回 |
-| 💰 **计费统计** | 自动记录 Token 用量、计算成本、按 Provider 聚合 |
-| 💉 **Prompt 注入** | 支持按 Provider/Model 通配匹配，自动注入 System/Prepend/Append 模板 |
-| 📈 **事件系统** | 内置 Provider 失败/恢复/Fallback/Audit 分歧事件 |
-| 🔄 **指数退避重试** | 可配置的重试策略，自动识别可重试错误 |
-| 🧹 **优雅关闭** | `Close()` 方法安全释放资源，拒绝新请求 |
+</div>
 
 ---
 
-## 安装
+## 📋 目录
 
-```bash
-go get github.com/JishiTeam-J1wa/AoEo
-```
+- [✨ 功能特性](#-功能特性)
+- [🚀 快速开始](#-快速开始)
+- [📦 安装](#-安装)
+- [🔧 核心功能](#-核心功能)
+  - [基础调用](#1-基础调用--primary-provider)
+  - [自动降级](#2-自动降级--fallback)
+  - [双模型验证](#3-双模型验证--dual)
+  - [流式响应](#4-流式响应--streaming)
+  - [审计模式](#5-审计模式--audit)
+  - [Prompt 注入](#6-prompt-注入)
+  - [计费统计](#7-计费统计)
+  - [事件系统](#8-事件系统)
+  - [优雅关闭](#9-优雅关闭)
+- [⚙️ 配置选项](#️-配置选项)
+- [🏗️ 架构设计](#️-架构设计)
+- [📊 生产部署建议](#-生产部署建议)
+- [📁 示例代码](#-示例代码)
+- [🗺️ 路线图](#️-路线图)
+- [📄 许可证](#-许可证)
 
 ---
 
-## 快速开始
+## ✨ 功能特性
+
+<table>
+<tr>
+<td width="50%">
+
+### 🔀 调度层
+- **🔄 多 Provider 聚合** — DeepSeek / Kimi / GLM / Qwen / 任意 OpenAI-compatible API
+- **⚡ 自动 Fallback** — 主 Provider 失败时自动切换备用
+- **🎯 Round-Robin 负载均衡** — Dual / Audit 模式下的智能分发
+- **🔒 自适应并发限流** — FIFO 信号量，防止配额耗尽
+
+</td>
+<td width="50%">
+
+### 🛡️ 可靠性
+- **🛡️ 熔断器 (Circuit Breaker)** — 连续 3 次失败 → 60s 自动冷却
+- **🔄 指数退避重试** — 智能识别可重试错误
+- **🧹 优雅关闭** — `Close()` 安全释放资源，拒绝新请求
+- **💥 Panic 恢复** — 所有 Provider 调用均带 defer recover
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 📡 高级调用模式
+- **📡 SSE 流式支持** — 原生 Streaming，逐字返回
+- **📊 双模型验证** — 并发调用两个 Provider，Consensus 判断一致性
+- **🔍 审计模式** — 串行交叉验证，自动降级
+- **🌡️ 温度兼容性** — Kimi `kimi-k2.6` 自动重试（temperature 适配）
+
+</td>
+<td width="50%">
+
+### 📈 可观测性
+- **💰 自动计费统计** — Token 用量 × 单价 = 实时成本
+- **💉 Prompt 注入** — 通配匹配 + 变量替换，零业务侵入
+- **📊 调用历史** — Ring buffer 记录，按标签/Provider 过滤
+- **📡 事件系统** — Provider 失败/恢复/Fallback/Audit 分歧事件
+- **📝 结构化日志** — `log/slog` JSON 输出
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🚀 快速开始
 
 ```go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
-    "os"
+	"context"
+	"fmt"
+	"log"
+	"os"
 
-    "github.com/JishiTeam-J1wa/AoEo"
+	aoeo "github.com/JishiTeam-J1wa/AoEo"
 )
 
 func main() {
-    client, err := aoeo.NewClient(aoeo.Config{
-        Providers: []aoeo.ProviderConfig{
-            {
-                Name:     "deepseek",
-                APIKey:   os.Getenv("DEEPSEEK_API_KEY"),
-                Endpoint: "https://api.deepseek.com",
-                Model:    "deepseek-v4-pro",
-            },
-            {
-                Name:     "kimi",
-                APIKey:   os.Getenv("KIMI_API_KEY"),
-                Endpoint: "https://api.moonshot.cn/v1",
-                Model:    "kimi-k2.6",
-            },
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer client.Close()
+	client, err := aoeo.NewClient(aoeo.Config{
+		Providers: []aoeo.ProviderConfig{
+			{
+				Name:     "deepseek",
+				APIKey:   os.Getenv("DEEPSEEK_API_KEY"),
+				Endpoint: "https://api.deepseek.com",
+				Model:    "deepseek-v4-pro",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
 
-    req := aoeo.BuildRequest(
-        []aoeo.Message{{Role: "user", Content: "Hello, world!"}},
-        aoeo.WithTemperature(0.7),
-    )
+	resp, err := client.ChatComplete(context.Background(),
+		aoeo.BuildRequest(
+			[]aoeo.Message{{Role: "user", Content: "Hello, world!"}},
+			aoeo.WithTemperature(0.7),
+		),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    resp, err := client.ChatComplete(context.Background(), req)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    fmt.Println(resp.Choices[0].Message.Content)
-    fmt.Printf("Cost: %.4f CNY | Tokens: %d\n",
-        resp.Usage.Cost(aoeo.DefaultPricing("deepseek", "deepseek-v4-pro")),
-        resp.Usage.TotalTokens)
+	fmt.Println(resp.Choices[0].Message.Content)
+	fmt.Printf("Cost: %.4f CNY\n",
+		resp.Usage.Cost(aoeo.DefaultPricing("deepseek", "deepseek-v4-pro")))
 }
 ```
 
+<details>
+<summary>💡 点击查看更多运行方式</summary>
+
+```bash
+# 1. 运行基础示例
+cd examples/basic
+go run main.go
+
+# 2. 运行多 Provider + Fallback + Dual
+cd examples/multi_provider
+go run main.go
+
+# 3. 运行 SSE 流式示例
+cd examples/streaming
+go run main.go
+```
+
+</details>
+
 ---
 
-## 功能详解
+## 📦 安装
+
+```bash
+go get github.com/JishiTeam-J1wa/AoEo
+```
+
+**Go 版本要求**: ≥ 1.22
+
+---
+
+## 🔧 核心功能
 
 ### 1. 基础调用 — Primary Provider
 
@@ -109,7 +186,9 @@ fmt.Printf("Usage: prompt=%d completion=%d total=%d\n",
     resp.Usage.TotalTokens)
 ```
 
-### 2. 自动 Fallback — 高可用保障
+---
+
+### 2. 自动降级 — Fallback
 
 主 Provider 失败后自动尝试下一个，直到成功或全部失败：
 
@@ -121,15 +200,11 @@ if err != nil {
 fmt.Printf("Response from: %s\n", resp.Model)
 ```
 
-**事件通知**（可选）：
-```go
-client.SetEmitter(&MyEventEmitter{})
+> 💡 **最佳实践**: 生产环境建议始终使用 `ChatCompleteWithFallback`，确保高可用性。
 
-// 当 Fallback 被触发时收到事件
-const EventFallbackTrigger = "scheduler:fallback"
-```
+---
 
-### 3. Dual 双模型验证 — 并发交叉调用
+### 3. 双模型验证 — Dual
 
 同时发给两个不同 Provider，返回两者结果 + 一致性判断：
 
@@ -148,7 +223,9 @@ if dual.Result2 != nil {
 }
 ```
 
-### 4. Streaming 流式响应
+---
+
+### 4. 流式响应 — Streaming
 
 ```go
 stream, err := client.ChatCompleteStream(ctx, req)
@@ -156,9 +233,10 @@ if err != nil {
     log.Fatal(err)
 }
 
+fmt.Print("[Streaming] ")
 for chunk := range stream {
     if chunk.Err != nil {
-        log.Printf("Stream error: %v\n", chunk.Err)
+        log.Printf("\n[Stream Error: %v]\n", chunk.Err)
         break
     }
     if chunk.Chunk.FinishReason != "" {
@@ -169,7 +247,11 @@ for chunk := range stream {
 }
 ```
 
-### 5. Audit 审计模式 — 串行交叉验证
+> ⚠️ **注意**: 消费端提前退出时，应同时 `cancel()` context 以确保 goroutine 正确退出。
+
+---
+
+### 5. 审计模式 — Audit
 
 先调用 Primary，再用另一个 Provider 验证结果：
 
@@ -189,7 +271,9 @@ if !result.Consensus {
 }
 ```
 
-### 6. Prompt 注入 — 动态模板
+---
+
+### 6. Prompt 注入
 
 #### 全局 System Prompt 注入
 
@@ -228,13 +312,18 @@ client, _ := aoeo.NewClient(cfg, aoeo.WithPromptInjector(pi))
 ```
 
 **注入位置**：
-- `"system"` — 替换/添加 system 消息
-- `"prepend_user"` — 在第一条 user 消息前插入
-- `"append_user"` — 在最后一条 user 消息后追加
 
-**通配匹配**：`Provider: "*"` 或 `Model: "*"` 匹配全部。
+| 位置 | 说明 |
+|---|---|
+| `"system"` | 替换/添加 system 消息 |
+| `"prepend_user"` | 在第一条 user 消息前插入 |
+| `"append_user"` | 在最后一条 user 消息后追加 |
 
-### 7. 计费统计 — 成本追踪
+**通配匹配**: `Provider: "*"` 或 `Model: "*"` 匹配全部。
+
+---
+
+### 7. 计费统计
 
 #### 配置价格
 
@@ -247,8 +336,8 @@ cfg := aoeo.Config{
             Endpoint: "https://api.deepseek.com",
             Model:    "deepseek-v4-pro",
             Pricing: aoeo.Pricing{
-                PromptPer1K:     2.0,  // 每1K prompt tokens 2元
-                CompletionPer1K: 8.0,  // 每1K completion tokens 8元
+                PromptPer1K:     2.0,  // 每 1K prompt tokens 2元
+                CompletionPer1K: 8.0,  // 每 1K completion tokens 8元
                 Currency:        "CNY",
             },
         },
@@ -259,9 +348,6 @@ cfg := aoeo.Config{
 #### 实时成本查询
 
 ```go
-hist := aoeo.NewHistory(500)
-client, _ := aoeo.NewClient(cfg, aoeo.WithHistory(hist))
-
 resp, _ := client.ChatComplete(ctx, req)
 fmt.Println(resp.Usage.CostString(cfg.Providers[0].Pricing))
 // 输出: 0.380000 CNY
@@ -286,12 +372,14 @@ req.Tags = []string{"production", "v2-prompt"}
 resp, _ := client.ChatComplete(ctx, req)
 
 // 后续查询
-for _, r := range hist.RecordsByTag("production") {
+for _, r := range client.History().RecordsByTag("production") {
     fmt.Printf("%s: %dms, cost=%.4f\n", r.Provider, r.LatencyMs, r.Cost)
 }
 ```
 
-### 8. 事件系统 — 监听 Provider 生命周期
+---
+
+### 8. 事件系统
 
 ```go
 type MyEmitter struct{}
@@ -314,7 +402,26 @@ func (e *MyEmitter) Emit(topic string, data ...any) {
 client.SetEmitter(&MyEmitter{})
 ```
 
-### 9. 配置选项
+---
+
+### 9. 优雅关闭
+
+```go
+// 安全关闭，拒绝新请求
+if err := client.Close(); err != nil {
+    log.Printf("Close error: %v", err)
+}
+
+// 关闭后所有调用返回错误
+_, err := client.ChatComplete(ctx, req)
+// err: "scheduler is closed"
+```
+
+> 💡 **最佳实践**: 始终 `defer client.Close()` 或在应用退出信号中调用。
+
+---
+
+## ⚙️ 配置选项
 
 ```go
 client, _ := aoeo.NewClient(cfg,
@@ -330,99 +437,60 @@ client, _ := aoeo.NewClient(cfg,
 )
 ```
 
-### 10. 模型列表查询
+---
 
-```go
-models, err := client.ListModels(ctx, "deepseek")
-for _, m := range models {
-    fmt.Printf("  - %s (by %s)\n", m.ID, m.OwnedBy)
-}
+## 🏗️ 架构设计
 
-// 连通性测试
-if err := client.TestProvider(ctx, "kimi"); err != nil {
-    log.Printf("Kimi unreachable: %v", err)
-}
-```
+```mermaid
+graph TB
+    User[User Code] --> Client[Client]
+    Client --> Scheduler[Scheduler]
 
-### 11. 优雅关闭
+    Scheduler --> PromptInjector[Prompt Injector]
+    Scheduler --> AdaptiveSemaphore[Adaptive Semaphore]
+    Scheduler --> History[History / Cost]
+    Scheduler --> Retry[Retry / Backoff]
 
-```go
-// 安全关闭，拒绝新请求
-if err := client.Close(); err != nil {
-    log.Printf("Close error: %v", err)
-}
+    Scheduler --> DS[DeepSeek Provider]
+    Scheduler --> KM[Kimi Provider]
+    Scheduler --> GLM[GLM Provider]
+    Scheduler --> QW[Qwen Provider]
+    Scheduler --> Generic[Generic OpenAI Provider]
 
-// 关闭后所有调用返回错误
-_, err := client.ChatComplete(ctx, req)
-// err: "scheduler is closed"
-```
+    DS --> SDK[go-openai SDK]
+    KM --> SDK
+    GLM --> SDK
+    QW --> SDK
+    Generic --> SDK
 
-### 12. 结构化日志
+    SDK --> HTTP[HTTP / SSE]
 
-默认使用 `log/slog` 输出 JSON 格式日志到 stderr：
-
-```json
-{"time":"2026-05-29T10:24:08","level":"WARN","msg":"circuit breaker opened","provider":"deepseek","failCount":3}
-```
-
-自定义日志：
-
-```go
-aoeo.SetLogger(mySlogLogger)
+    style Client fill:#00ADD8,stroke:#fff,color:#fff
+    style Scheduler fill:#1D5CFE,stroke:#fff,color:#fff
+    style PromptInjector fill:#FF6B6B,stroke:#fff,color:#fff
+    style AdaptiveSemaphore fill:#4CAF50,stroke:#fff,color:#fff
+    style History fill:#FF9800,stroke:#fff,color:#fff
 ```
 
 ---
 
-## 支持的 Provider
+## 📊 支持的 Provider
 
-| Provider | 内置工厂 | 默认端点 | 默认模型 |
-|---|---|---|---|
-| **DeepSeek** | `aoeo.NewDeepSeekProvider()` | `https://api.deepseek.com` | `deepseek-v4-pro` |
-| **Kimi (Moonshot)** | `aoeo.NewKimiProvider()` | `https://api.moonshot.cn/v1` | `kimi-k2.6` |
-| **GLM (智谱)** | `aoeo.NewGLMProvider()` | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.1` |
-| **Qwen (通义)** | `aoeo.NewQwenProvider()` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.7-max` |
-| **Claude / OpenAI / 任意兼容** | `aoeo.NewOpenAIProvider()` | `https://api.openai.com/v1` | *(从配置读取)* |
+| Provider | 内置工厂 | 默认端点 | 默认模型 | 内置价格 |
+|---|---|---|---|---|
+| **DeepSeek** | `aoeo.NewDeepSeekProvider()` | `https://api.deepseek.com` | `deepseek-v4-pro` | 2/8 CNY |
+| **Kimi (Moonshot)** | `aoeo.NewKimiProvider()` | `https://api.moonshot.cn/v1` | `kimi-k2.6` | 3/12 CNY |
+| **GLM (智谱)** | `aoeo.NewGLMProvider()` | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.1` | 5/5 CNY |
+| **Qwen (通义)** | `aoeo.NewQwenProvider()` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.7-max` | 5/10 CNY |
+| **Claude / OpenAI / 任意兼容** | `aoeo.NewOpenAIProvider()` | `https://api.openai.com/v1` | *(从配置)* | *(自定义)* |
 
-任何支持 OpenAI Chat Completions 协议的 API 都可以通过 `NewOpenAIProvider()` 接入。
-
----
-
-## 架构设计
-
-```
-┌─────────────┐
-│   Client    │  ← 用户入口，fluent API，事件发射
-└──────┬──────┘
-       │
-┌──────▼──────┐
-│  Scheduler  │  ← Provider 管理、负载均衡、并发控制、Prompt 注入
-└──────┬──────┘
-       │
-  ┌────┼────┬────────┐
-  ▼    ▼    ▼        ▼
-┌───┐┌───┐┌───┐  ┌───────┐
-│DS ││KM ││GLM│  │Generic│  ← Provider 实现 (OpenAI-compatible)
-└───┘└───┘└───┘  └───────┘
-  │    │    │        │
-  └────┴────┴────────┘
-         │
-    go-openai SDK
-         │
-    HTTP / SSE
-```
-
-**核心组件**：
-- **Provider 接口**：统一抽象，支持自定义实现
-- **BaseProvider**：熔断器、系统提示词覆盖、事件发射
-- **Scheduler**：Primary 选择、Round-Robin、自适应信号量
-- **History**：调用记录、Token 统计、成本聚合、标签过滤
-- **PromptInjector**：模板匹配、变量替换、多位置注入
+> 💡 任何支持 OpenAI Chat Completions 协议的 API 都可以通过 `NewOpenAIProvider()` 接入。
 
 ---
 
-## 生产部署建议
+## 📊 生产部署建议
 
-### 1. 环境变量管理 API Key
+### 1️⃣ 环境变量管理 API Key
 
 **永远不要**在代码中硬编码 API Key：
 
@@ -433,16 +501,16 @@ if apiKey == "" {
 }
 ```
 
-### 2. 设置合理的并发上限
+### 2️⃣ 设置合理的并发上限
 
 ```go
 ProviderConfig{
     Name:          "deepseek",
-    MaxConcurrent: 5,  // 根据平台速率限制调整
+    MaxConcurrent: 5,  // 根据平台 RPM/TPM 限制调整
 }
 ```
 
-### 3. 启用历史记录用于监控
+### 3️⃣ 启用历史记录用于监控
 
 ```go
 hist := aoeo.NewHistory(10000)  // 保留最近 10000 条记录
@@ -458,7 +526,7 @@ for range ticker.C {
 }
 ```
 
-### 4. 处理 Stream 消费者的提前退出
+### 4️⃣ 处理 Stream 消费者的提前退出
 
 调用方如果提前 `break` 或 `return`，应同时 `cancel` ctx 以确保 goroutine 正确退出：
 
@@ -475,7 +543,7 @@ for chunk := range stream {
 }
 ```
 
-### 5. 自定义 Logger
+### 5️⃣ 自定义 Logger
 
 ```go
 logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -486,24 +554,37 @@ aoeo.SetLogger(logger)
 
 ---
 
-## 完整示例
+## 📁 示例代码
 
 见 [`examples/`](examples/) 目录：
 
-- [`basic/`](examples/basic/) — 单 Provider 基础调用
-- [`multi_provider/`](examples/multi_provider/) — 多 Provider + Fallback + Dual
-- [`streaming/`](examples/streaming/) — SSE 流式响应
-- [`list_models/`](examples/list_models/) — 模型列表查询 + 连通性测试
+| 示例 | 说明 |
+|---|---|
+| [`basic/`](examples/basic/) | 单 Provider 基础调用 + 成本输出 |
+| [`multi_provider/`](examples/multi_provider/) | 多 Provider + Fallback + Dual + Stats |
+| [`streaming/`](examples/streaming/) | SSE 流式响应 |
+| [`list_models/`](examples/list_models/) | 模型列表查询 + 连通性测试 |
 
 ---
 
-## Roadmap
+## 🗺️ 路线图
 
+### ✅ Phase 1 — 核心调度
+- [x] 统一 Provider 接口
+- [x] 4 大内置 Provider + Generic OpenAI
+- [x] 熔断器 + 自适应并发限流
+- [x] Fallback + Dual + Audit
+- [x] 模型列表查询 + 连通性测试
+- [x] SSE 流式支持
+
+### ✅ Phase 2 — 生产增强
 - [x] 指数退避重试
 - [x] Token 用量追踪与成本估算
-- [x] Prompt 注入系统
-- [x] 结构化日志
-- [x] 优雅关闭
+- [x] Prompt 注入系统（通配匹配 + 变量替换）
+- [x] 结构化日志（`log/slog`）
+- [x] 优雅关闭（Graceful Shutdown）
+
+### 🔮 Phase 3 — 生态扩展
 - [ ] 权重路由（按价格/延迟/质量加权）
 - [ ] Provider 主动健康检查心跳
 - [ ] Function Calling 抽象层
@@ -511,6 +592,8 @@ aoeo.SetLogger(logger)
 
 ---
 
-## License
+## 📄 许可证
 
-MIT License. See [LICENSE](LICENSE) for details.
+[MIT License](LICENSE) © JishiTeam J1wa
+
+> **AoEo** 这个名字来源于 *"Aggregation of Everything Open"*，寓意聚合一切 OpenAI-compatible 的模型服务。
