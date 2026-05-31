@@ -68,7 +68,10 @@
 │  │Circuit Breaker│  │ProviderStatus│  │PromptInjector      │  │
 │  └──────────────┘  └─────────────┘  └────────────────────┘  │
 │  ┌──────────────┐  ┌─────────────┐  ┌────────────────────┐  │
-│  │History/Cost  │  │RetryConfig   │  │Graceful Shutdown   │  │
+│  │History/Cost  │  │RetryConfig   │  │InterceptorChain    │  │
+│  └──────────────┘  └─────────────┘  └────────────────────┘  │
+│  ┌──────────────┐  ┌─────────────┐  ┌────────────────────┐  │
+│  │Graceful Shutd│  │EnvConfig     │  │Proxy/HTTPClient    │  │
 │  └──────────────┘  └─────────────┘  └────────────────────┘  │
 └─────────┬──────────────────┬────────────────────┬──────────┘
           │                  │                    │
@@ -220,6 +223,57 @@ type ProviderStats struct {
 - 自动按 Provider 聚合统计：调用次数、失败次数、延迟分布、总成本
 - 支持按标签过滤历史记录
 - `Currency` 由首次见到的记录价格决定，保持单 Provider 单币种语义
+
+#### 2.2.8 Interceptor — 请求/响应拦截器
+
+```go
+type Interceptor struct {
+    BeforeRequest func(ctx context.Context, req *ChatCompletionRequest) error
+    AfterResponse func(ctx context.Context, req ChatCompletionRequest, resp *ChatCompletionResponse, err error) (*ChatCompletionResponse, error)
+}
+```
+
+**职责**：
+- `BeforeRequest`：请求发送前执行，可修改请求或中止调用
+- `AfterResponse`：Provider 返回后执行，可转换响应/错误
+
+**设计决策**：
+- 链式执行，多个拦截器按注册顺序调用
+- `BeforeRequest` 遇到错误立即短路，不再继续后续拦截器和 Provider 调用
+- `AfterResponse` 每个钩子可修改返回值，对调用方完全透明
+- 使用 `atomic.Pointer[[]Interceptor]` 保证线程安全，支持运行时动态替换
+- 与 Scheduler 解耦：拦截器属于调度选项，不影响 Provider 实现
+
+#### 2.2.9 Proxy / HTTPClient — 网络层定制
+
+每个 Provider 独立配置网络出口：
+
+```go
+type ProviderConfig struct {
+    HTTPClient *http.Client  // 完全自定义 HTTP 行为（追踪、Mock、特殊 TLS）
+    Proxy      string        // HTTP / SOCKS5 代理 URL
+}
+```
+
+**优先级**：自定义 `HTTPClient` > `Proxy` 字段 > 环境变量 `HTTP_PROXY`
+
+**实现**：`buildHTTPClient()` 在 `NewOpenAIProvider` 时组装最终 `*http.Client`：
+- 若只提供了 `Proxy`，克隆 `http.DefaultTransport` 并注入 `ProxyURL`
+- 若提供了自定义 `HTTPClient`，保留其 `CheckRedirect`/`Jar`，覆盖 Transport 上的 `Proxy` 和 `TLSConfig`
+- 支持 `SkipTLSVerify` 与自定义 Transport 共存
+
+#### 2.2.10 EnvConfig — 环境变量配置源
+
+```go
+cfg := aoeo.LoadConfigFromEnv()
+```
+
+**设计决策**：
+- 零配置启动：容器化/K8s 场景下无需修改代码即可切换 Provider
+- 统一前缀 `AOEO_PROVIDER_{N}_*`，索引从 0 开始，遇到空位终止扫描
+- 支持字段：NAME、API_KEY、ENDPOINT、MODEL、MAX_CONCURRENT、SKIP_TLS_VERIFY、PROXY
+- 提供 `LoadConfigFromEnvWithPrefix()` 支持自定义前缀，避免与其他应用冲突
+- `SetEnvConfig()` / `UnsetEnvConfig()` 用于测试和 CLI 工具，不推荐给生产 secret 管理
 
 ---
 
@@ -438,6 +492,10 @@ type EventEmitter interface {
 | **结构化日志** | `slog` JSON 输出 |
 | **请求预验证** | `Validate()` 提前拦截无效参数 |
 | **安全访问器** | `Content()` 避免 `Choices[0]` panic |
+| **拦截器** | `BeforeRequest` / `AfterResponse` Hook |
+| **定向代理** | 按 Provider 独立配置 Proxy / HTTPClient |
+| **环境变量配置** | `LoadConfigFromEnv()` 零代码启动 |
+| **测试覆盖** | 201 个单元测试，`-race` 干净 |
 
 ---
 
@@ -503,7 +561,12 @@ scheduler := aoeo.NewScheduler(providers...)
 - [x] 结构化日志（`log/slog`）
 - [x] 优雅关闭（Graceful Shutdown）
 
-### Phase 3 — 生态
+### Phase 3 — 网络与可观测性（已完成）
+- [x] 定向 AI API 代理（Proxy / HTTPClient）
+- [x] 拦截器机制（Interceptor Chain）
+- [x] 环境变量配置（`LoadConfigFromEnv`）
+
+### Phase 4 — 生态
 - [ ] Provider 健康检查（定时探测）
 - [ ] 权重路由（按价格/速度/质量加权）
 - [ ] CLI 工具（`aoeo list-models`, `aoeo test`）

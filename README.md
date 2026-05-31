@@ -230,6 +230,106 @@ client.SetEmitter(&MyEmitter{})
 // audit:disagree   — 审计发现分歧
 ```
 
+### 10. 定向 AI API 代理
+
+每个 Provider 可独立配置代理，支持 HTTP 代理 URL、环境变量 `HTTP_PROXY` 和 SOCKS5 URL：
+
+```go
+cfg := aoeo.Config{
+    Providers: []aoeo.ProviderConfig{
+        {
+            Name:  "kimi",
+            Proxy: "http://proxy-a1.example.com:8080", // Kimi 走代理 A1
+        },
+        {
+            Name:  "gpt",
+            Proxy: "socks5://127.0.0.1:1080", // GPT 走 SOCKS5
+        },
+        {
+            Name:  "deepseek",
+            Proxy: "", // 空值则遵循系统环境变量 HTTP_PROXY
+        },
+    },
+}
+```
+
+适用场景：
+- 不同 Provider 的网络出口隔离
+- 内网环境通过不同代理访问外网
+- 按 Provider 走不同线路优化延迟
+
+### 11. 拦截器机制
+
+`core.Interceptor` 提供 `BeforeRequest` / `AfterResponse` Hook，用于日志、监控、限流、请求篡改等横切关注点：
+
+```go
+ic := aoeo.Interceptor{
+    BeforeRequest: func(ctx context.Context, req *aoeo.ChatCompletionRequest) error {
+        // 例如：注入 Trace ID、校验预算
+        req.Tags = append(req.Tags, "trace:xyz")
+        return nil
+    },
+    AfterResponse: func(ctx context.Context, req aoeo.ChatCompletionRequest, resp *aoeo.ChatCompletionResponse, err error) (*aoeo.ChatCompletionResponse, error) {
+        // 例如：记录延迟、统一错误包装
+        return resp, err
+    },
+}
+
+client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(ic))
+```
+
+- 多个拦截器按顺序执行，`BeforeRequest` 遇到错误立即中断
+- `AfterResponse` 可转换响应或错误，对调用方透明
+- 实现必须线程安全
+
+### 12. 环境变量配置
+
+无需硬编码，直接从 `AOEO_PROVIDER_N_*` 环境变量加载配置：
+
+```bash
+export AOEO_PROVIDER_0_NAME=deepseek
+export AOEO_PROVIDER_0_API_KEY=sk-xxx
+export AOEO_PROVIDER_0_ENDPOINT=https://api.deepseek.com
+export AOEO_PROVIDER_0_MODEL=deepseek-v4-pro
+export AOEO_PROVIDER_0_PROXY=http://proxy.example.com:8080
+
+export AOEO_PROVIDER_1_NAME=kimi
+export AOEO_PROVIDER_1_API_KEY=sk-yyy
+export AOEO_PROVIDER_1_ENDPOINT=https://api.moonshot.cn/v1
+export AOEO_PROVIDER_1_MODEL=kimi-k2.6
+```
+
+```go
+cfg := aoeo.LoadConfigFromEnv()
+client, err := aoeo.NewClient(cfg)
+```
+
+还支持自定义前缀：`LoadConfigFromEnvWithPrefix("MYAPP")` 读取 `MYAPP_PROVIDER_0_NAME` 等变量。
+
+### 13. 自定义 HTTPClient
+
+为单个 Provider 注入自定义 `*http.Client`，用于链路追踪、Mock 测试或特殊 TLS 配置：
+
+```go
+httpClient := &http.Client{
+    Timeout: 30 * time.Second,
+    Transport: &http.Transport{
+        TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+    },
+}
+
+cfg := aoeo.Config{
+    Providers: []aoeo.ProviderConfig{
+        {
+            Name:       "deepseek",
+            HTTPClient: httpClient, // 完全自定义 HTTP 行为
+        },
+    },
+}
+```
+
+优先级：自定义 `HTTPClient` > `Proxy` 字段 > 环境变量 `HTTP_PROXY`。
+
 ---
 
 ## 支持的 Provider
@@ -291,7 +391,7 @@ AoEo/
 ├── DESIGN.md
 ├── AUDIT_REPORT.md
 ├── LICENSE
-└── aoeo_test.go       # 49 个单元测试（含 Race Detector）
+└── aoeo_test.go       # 201 个单元测试（含 Race Detector）
 ```
 
 ---
@@ -309,27 +409,13 @@ AoEo/
 - [x] 安全访问器 `Content()`
 - [x] Stream Usage 透传
 
-### Phase 3 — 网络增强
-- [ ] **定向 AI API 代理**
+### Phase 3 — 网络与可观测性增强（已完成）
+- [x] **定向 AI API 代理**
+- [x] **拦截器机制（BeforeRequest / AfterResponse）**
+- [x] **环境变量配置（`LoadConfigFromEnv`）**
+- [x] **自定义 HTTPClient**
 
-  支持为不同 Provider 配置独立代理：
-
-  ```go
-  ProviderConfig{
-      Name:    "kimi",
-      Proxy:   "http://proxy-a1.example.com:8080",  // Kimi 走代理 A1
-  },
-  ProviderConfig{
-      Name:    "gpt",
-      Proxy:   "http://proxy-a2.example.com:8080",  // GPT 走代理 A2
-  }
-  ```
-
-  适用场景：
-  - 不同 Provider 的网络出口隔离
-  - 内网环境通过不同代理访问外网
-  - 按 Provider 走不同线路优化延迟
-
+### Phase 4 — 生态扩展
 - [ ] 权重路由（按价格/延迟/质量加权选择 Provider）
 - [ ] Provider 主动健康检查心跳
 - [ ] Function Calling 抽象层

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -196,24 +197,87 @@ func NewOpenAIProvider(config core.ProviderConfig) *OpenAIProvider {
 
 	oc := openai.DefaultConfig(config.APIKey)
 	oc.BaseURL = config.Endpoint
-	if config.SkipTLSVerify {
-		if tr, ok := http.DefaultTransport.(*http.Transport); ok {
-			cloned := tr.Clone()
-			cloned.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-			oc.HTTPClient = &http.Client{Transport: cloned}
-		}
-	}
 
-	// Add sensible HTTP client timeouts to prevent indefinite hangs.
-	if oc.HTTPClient == nil {
-		oc.HTTPClient = &http.Client{
-			Timeout: 120 * time.Second,
-		}
-	}
+	// Build the final HTTP client with support for custom HTTPClient, Proxy, and SkipTLSVerify.
+	oc.HTTPClient = buildHTTPClient(config)
 
 	return &OpenAIProvider{
 		BaseProvider: NewBaseProvider(config),
 		Client:       openai.NewClientWithConfig(oc),
+	}
+}
+
+// buildHTTPClient assembles an *http.Client from ProviderConfig fields.
+// Priority: custom HTTPClient transport > DefaultTransport, then applies Proxy and SkipTLSVerify.
+// When a custom HTTPClient is provided, its CheckRedirect and Jar are preserved.
+func buildHTTPClient(config core.ProviderConfig) *http.Client {
+	// Fast path: no modifications needed.
+	if config.Proxy == "" && !config.SkipTLSVerify {
+		if config.HTTPClient != nil {
+			return config.HTTPClient
+		}
+		return &http.Client{Timeout: 120 * time.Second}
+	}
+
+	// Slow path: need to build a transport with Proxy and/or TLS overrides.
+	var base *http.Client
+	if config.HTTPClient != nil {
+		base = config.HTTPClient
+	}
+
+	var timeout time.Duration
+	if base != nil {
+		timeout = base.Timeout
+	}
+	if timeout == 0 {
+		timeout = 120 * time.Second
+	}
+
+	transport := deriveTransport(base)
+
+	// Apply proxy if configured.
+	if config.Proxy != "" {
+		proxyURL, err := url.Parse(config.Proxy)
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
+	// Apply TLS skip verify if configured.
+	if config.SkipTLSVerify {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+	if base != nil {
+		client.CheckRedirect = base.CheckRedirect
+		client.Jar = base.Jar
+	}
+	return client
+}
+
+// deriveTransport returns a cloneable *http.Transport from the given client,
+// falling back to http.DefaultTransport if the client's transport is not cloneable.
+// The returned transport always respects HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars
+// unless an explicit Proxy was already configured by the caller.
+func deriveTransport(base *http.Client) *http.Transport {
+	if base != nil && base.Transport != nil {
+		if t, ok := base.Transport.(*http.Transport); ok {
+			return t.Clone()
+		}
+	}
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	// Fallback: create a minimal transport that still respects standard proxy env vars.
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
 	}
 }
 

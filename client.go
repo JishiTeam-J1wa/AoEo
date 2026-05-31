@@ -40,6 +40,8 @@ type (
 	PromptInjector           = engine.PromptInjector
 	Scheduler                = engine.Scheduler
 	SchedulerOption          = engine.SchedulerOption
+	Interceptor              = core.Interceptor
+	InterceptorChain         = core.InterceptorChain
 	Provider                 = providers.Provider
 )
 
@@ -67,6 +69,12 @@ var (
 	NewQwenProvider         = providers.NewQwenProvider
 	NewOpenAIProvider       = providers.NewOpenAIProvider
 	NewBaseProvider         = providers.NewBaseProvider
+	LoadConfigFromEnv       = core.LoadConfigFromEnv
+	LoadConfigFromEnvWithPrefix = core.LoadConfigFromEnvWithPrefix
+	EnvConfigString         = core.EnvConfigString
+	RetryConfigFromEnv      = core.RetryConfigFromEnv
+	SetEnvConfig            = core.SetEnvConfig
+	UnsetEnvConfig          = core.UnsetEnvConfig
 )
 
 // WithXxx options re-exported from engine.
@@ -75,6 +83,7 @@ var (
 	WithHistory              = engine.WithHistory
 	WithRetry                = engine.WithRetry
 	WithPromptInjector       = engine.WithPromptInjector
+	WithInterceptors         = engine.WithInterceptors
 	InjectPrompts            = engine.InjectPrompts
 	WithSystemPromptInjector = engine.WithSystemPromptInjector
 )
@@ -217,6 +226,16 @@ func (c *Client) PromptInjector() *engine.PromptInjector {
 // SetPromptInjector attaches a prompt injector to the client.
 func (c *Client) SetPromptInjector(pi *engine.PromptInjector) {
 	c.scheduler.SetPromptInjector(pi)
+}
+
+// Interceptors returns the current interceptor chain (may be nil).
+func (c *Client) Interceptors() []core.Interceptor {
+	return c.scheduler.Interceptors()
+}
+
+// SetInterceptors replaces the interceptor chain.
+func (c *Client) SetInterceptors(ic []core.Interceptor) {
+	c.scheduler.SetInterceptors(ic)
 }
 
 // Close gracefully shuts down the client. It is safe to call multiple times.

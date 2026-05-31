@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -19,6 +20,8 @@ type ProviderConfig struct {
 	Pricing          Pricing       `json:"pricing"`          // Optional; falls back to DefaultPricing
 	MaxFailures      int           `json:"maxFailures"`      // Circuit breaker threshold (default 3)
 	CooldownDuration time.Duration `json:"cooldownDuration"` // Circuit breaker cooldown (default 60s)
+	HTTPClient       *http.Client  `json:"-"`                // Optional custom HTTP client (tracing, proxy, mock)
+	Proxy            string        `json:"proxy,omitempty"`  // HTTP/SOCKS5 proxy URL (e.g. http://proxy:8080)
 }
 
 // Config holds the full configuration including all providers and mode.

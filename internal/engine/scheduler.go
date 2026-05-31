@@ -36,6 +36,15 @@ func WithRetry(cfg core.RetryConfig) SchedulerOption {
 	}
 }
 
+// WithInterceptors attaches interceptors to the scheduler.
+func WithInterceptors(ic ...core.Interceptor) SchedulerOption {
+	return func(s *Scheduler) {
+		cpy := make([]core.Interceptor, len(ic))
+		copy(cpy, ic)
+		s.interceptors.Store(&cpy)
+	}
+}
+
 // Sentinel errors for SDK consumers to use with errors.Is().
 var (
 	ErrSchedulerClosed          = errors.New("scheduler is closed")
@@ -72,6 +81,9 @@ type Scheduler struct {
 
 	// Optional prompt injector.
 	promptInjector atomic.Pointer[PromptInjector]
+
+	// Optional interceptors.
+	interceptors atomic.Pointer[[]core.Interceptor]
 
 	// Cached available providers (refreshed on access if stale).
 	availCache    atomic.Pointer[availCacheEntry]
@@ -238,6 +250,12 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
+	// Apply interceptor BeforeRequest hooks.
+	chain := s.interceptorChain()
+	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
+		return nil, err
+	}
+
 	providerCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
 	defer cancel()
 
@@ -251,6 +269,7 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 		if s.history != nil {
 			s.history.Record(s.buildRecord(p, reqCopy, resp, start, err, req.Tags, ""))
 		}
+		resp, err = chain.ApplyAfter(ctx, reqCopy, resp, err)
 	}()
 
 	if s.retry.MaxRetries > 0 {
@@ -268,7 +287,7 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 
 // ChatCompleteWithFallback tries the primary provider first; on failure,
 // it falls back to the next available provider automatically.
-func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
+func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
@@ -276,6 +295,15 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 	if len(available) == 0 {
 		return nil, ErrNoAvailableProvider
 	}
+
+	// Apply interceptor BeforeRequest hooks once before the fallback loop.
+	chain := s.interceptorChain()
+	if err := chain.ApplyBefore(ctx, &req); err != nil {
+		return nil, err
+	}
+	defer func() {
+		resp, err = chain.ApplyAfter(ctx, req, resp, err)
+	}()
 
 	var lastErr error
 	var fallbackFrom string
@@ -346,6 +374,12 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 	available := s.AvailableProviders()
 	if len(available) == 0 {
 		return nil, ErrNoAvailableProvider
+	}
+
+	// Apply interceptor BeforeRequest hooks once before the dual call.
+	chain := s.interceptorChain()
+	if err := chain.ApplyBefore(ctx, &req); err != nil {
+		return nil, err
 	}
 
 	p1 := s.PickProviderRoundRobin()
@@ -681,4 +715,26 @@ func (s *Scheduler) PromptInjector() *PromptInjector {
 // SetPromptInjector attaches a prompt injector to the scheduler.
 func (s *Scheduler) SetPromptInjector(pi *PromptInjector) {
 	s.promptInjector.Store(pi)
+}
+
+// Interceptors returns the current interceptor slice (may be nil).
+func (s *Scheduler) Interceptors() []core.Interceptor {
+	if ptr := s.interceptors.Load(); ptr != nil {
+		return *ptr
+	}
+	return nil
+}
+
+// SetInterceptors replaces the interceptor chain.
+func (s *Scheduler) SetInterceptors(ic []core.Interceptor) {
+	cpy := make([]core.Interceptor, len(ic))
+	copy(cpy, ic)
+	s.interceptors.Store(&cpy)
+}
+
+func (s *Scheduler) interceptorChain() core.InterceptorChain {
+	if ptr := s.interceptors.Load(); ptr != nil {
+		return core.InterceptorChain(*ptr)
+	}
+	return nil
 }

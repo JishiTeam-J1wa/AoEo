@@ -264,9 +264,8 @@ issuesMap := cfg.Validate() // map[providerName][]issue
 |---|---|---|
 | P1 | 流式 Fallback | `ChatCompleteStream` 目前不支持 Fallback |
 | P1 | Provider 健康心跳 | 定时自动探测 Provider 可用性，而非被动检查 |
-| P2 | 请求/响应拦截器 | `BeforeRequest` / `AfterResponse` Hook |
-| P2 | Trace ID | 为每次调用生成唯一 ID，便于链路追踪 |
-| P2 | 成本估算 | 根据各平台定价计算调用成本 |
+| P2 | Trace ID | 为每次调用生成唯一 ID，便于链路追踪（已在 7.2.1 实施） |
+| P2 | 成本估算 | 根据各平台定价计算调用成本（已在 Pricing/Cost 实施） |
 | P3 | CLI 工具 | `aoeo list-models`, `aoeo test`, `aoeo history` |
 | P3 | Web UI | 基于 History 的轻量 Web 面板 |
 
@@ -426,3 +425,91 @@ if issues := req.Validate(); len(issues) > 0 {
 | 编译状态 | ✅ 通过 |
 | 测试状态 | ✅ 49/49 通过，`-race` 干净 |
 
+
+---
+
+## 八、第四轮审计（2026-05-31）— 网络增强与可观测性
+
+> 审计视角：检查新增的网络层定制能力（Proxy、HTTPClient）、请求/响应拦截器、环境变量配置源的实现质量、线程安全和测试覆盖。
+
+### 8.1 P0 级功能（已实施）
+
+#### 8.1.1 定向 AI API 代理
+
+**新增 `ProviderConfig.Proxy` + `buildHTTPClient()`**：
+- 每个 Provider 独立配置代理，支持 `http://`、`https://`、`socks5://` 协议
+- 空值时自动回退到系统环境变量 `HTTP_PROXY`
+- 与 `SkipTLSVerify` 和自定义 `HTTPClient` 共存时不冲突
+
+**设计决策**：
+- 优先级：自定义 `HTTPClient` > `Proxy` 字段 > 环境变量
+- 若调用方只提供 `Proxy`，复用 `http.DefaultTransport` 减少连接池浪费
+- 若调用方提供自定义 `HTTPClient`，保留其 `CheckRedirect`/`Jar`，仅覆盖 Transport 层代理设置
+
+#### 8.1.2 自定义 HTTPClient
+
+**新增 `ProviderConfig.HTTPClient`**：
+- 支持为单个 Provider 注入预配置的 `*http.Client`
+- 典型用途：分布式链路追踪（OpenTelemetry Transport）、Mock 测试（httptest）、自定义 TLS/根证书
+
+#### 8.1.3 拦截器机制
+
+**新增 `core/interceptor.go` + `scheduler` 集成**：
+
+```go
+type Interceptor struct {
+    BeforeRequest func(ctx context.Context, req *ChatCompletionRequest) error
+    AfterResponse func(ctx context.Context, req ChatCompletionRequest, resp *ChatCompletionResponse, err error) (*ChatCompletionResponse, error)
+}
+```
+
+**线程安全**：`Scheduler.interceptors` 使用 `atomic.Pointer[[]Interceptor]`，支持运行时 `SetInterceptors()`。
+
+**调度顺序**（与 PromptInjector 的协作）：
+```
+User → Scheduler
+  ├── Interceptor.ApplyBefore()   ← 拦截器先执行（可修改请求）
+  ├── PromptInjector.Inject()     ← 再注入系统提示
+  ├── Provider.ChatComplete()
+  └── Interceptor.ApplyAfter()    ← 最后执行后置 Hook
+```
+
+#### 8.1.4 环境变量配置源
+
+**新增 `core/env.go`**：
+- `LoadConfigFromEnv()`：标准前缀 `AOEO_PROVIDER_N_*`
+- `LoadConfigFromEnvWithPrefix()`：支持自定义前缀
+- 扫描遇到空索引自动终止，避免无限循环
+- 支持字段：NAME、API_KEY、ENDPOINT、MODEL、MAX_CONCURRENT、SKIP_TLS_VERIFY、PROXY
+- `RetryConfigFromEnv()` 独立加载重试参数
+
+### 8.2 P1 级质量加固
+
+#### 8.2.1 测试覆盖扩张
+
+| 指标 | 第三轮 | 第四轮 |
+|---|---|---|
+| 测试总数 | 49 | **201** |
+| 新增测试 | 12 | **152** |
+| Race Detector | ✅ 干净 | ✅ 干净 |
+
+新增测试重点：
+- `core/interceptor_test.go`：拦截器链式执行、Before 短路、After 转换、并发安全
+- `core/env_test.go`：环境变量解析、前缀定制、空值边界、RetryConfig 加载
+- `providers/providers_test.go`：Proxy 组装、自定义 HTTPClient 透传、TLS 跳过
+- `internal/engine/scheduler_test.go`：Interceptor 与 Scheduler 集成、SetInterceptors 并发安全
+
+#### 8.2.2 `ProviderConfig` 安全序列化
+
+**新增 `MarshalJSON`**：序列化时自动将 `APIKey` 替换为 `***`，防止配置日志泄露凭证。
+
+### 8.3 变更统计（第四轮）
+
+| 类别 | 数量 |
+|---|---|
+| 新增文件 | 3 (`core/env.go`, `core/interceptor.go`, 各配套 `*_test.go`) |
+| 修改文件 | 5+ (`providers.go`, `scheduler.go`, `client.go`, `config.go`, `options.go`) |
+| 新增功能 | 4（定向代理、HTTPClient、拦截器、环境变量配置） |
+| 新增测试 | 152 |
+| 编译状态 | ✅ 通过 |
+| 测试状态 | ✅ 201/201 通过，`-race` 干净 |
