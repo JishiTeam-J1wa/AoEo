@@ -13,6 +13,28 @@ type RetryConfig struct {
 	Retryable  func(error) bool
 }
 
+// Validate checks the retry configuration for invalid values.
+// Returns a slice of error messages; empty slice means valid.
+func (cfg RetryConfig) Validate() []string {
+	var issues []string
+	if cfg.MaxRetries < 0 {
+		issues = append(issues, "maxRetries must be >= 0")
+	}
+	if cfg.BaseDelay < 0 {
+		issues = append(issues, "baseDelay must be >= 0")
+	}
+	if cfg.MaxDelay < 0 {
+		issues = append(issues, "maxDelay must be >= 0")
+	}
+	if cfg.MaxDelay > 0 && cfg.BaseDelay > cfg.MaxDelay {
+		issues = append(issues, "baseDelay must be <= maxDelay")
+	}
+	if cfg.Multiplier < 0 {
+		issues = append(issues, "multiplier must be >= 0")
+	}
+	return issues
+}
+
 // DefaultRetryConfig returns a sensible default retry configuration.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{

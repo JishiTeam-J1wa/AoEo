@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,6 +20,7 @@ type Provider interface {
 	Name() string
 	Config() core.ProviderConfig
 	ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error)
+	ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error)
 	IsAvailable() bool
 	ListModels(ctx context.Context) ([]core.ModelInfo, error)
 	SetEmitter(e core.EventEmitter)
@@ -180,6 +182,12 @@ func (b *BaseProvider) GetSystemPrompt() string {
 	return override
 }
 
+// ChatCompleteStream provides a default implementation that returns an error.
+// Providers that support streaming should override this method.
+func (b *BaseProvider) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	return nil, fmt.Errorf("provider %s does not support streaming", b.config.Name)
+}
+
 // OpenAIProvider implements a generic OpenAI-compatible provider adapter.
 // It works with any API that follows the OpenAI chat completions protocol,
 // including self-hosted models (vLLM, Ollama, etc.).
@@ -282,6 +290,123 @@ func deriveTransport(base *http.Client) *http.Transport {
 }
 
 func (p *OpenAIProvider) Name() string { return p.Config().Name }
+
+// ChatCompleteStream performs a streaming chat completion.
+func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	messages := make([]openai.ChatCompletionMessage, len(req.Messages))
+	for i, m := range req.Messages {
+		messages[i] = openai.ChatCompletionMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		}
+	}
+
+	// Inject system prompt override if set.
+	if sys := p.GetSystemPrompt(); sys != "" {
+		messages = append([]openai.ChatCompletionMessage{{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: sys,
+		}}, messages...)
+	}
+
+	var respFormat *openai.ChatCompletionResponseFormat
+	if req.ResponseFormat.Type != "" {
+		respFormat = &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatType(req.ResponseFormat.Type),
+		}
+	}
+
+	streamReq := openai.ChatCompletionRequest{
+		Model:            req.Model,
+		Messages:         messages,
+		Temperature:      req.Temperature,
+		MaxTokens:        req.MaxTokens,
+		TopP:             req.TopP,
+		PresencePenalty:  req.PresencePenalty,
+		FrequencyPenalty: req.FrequencyPenalty,
+		Stop:             req.Stop,
+		Seed:             req.Seed,
+		ResponseFormat:   respFormat,
+		Stream:           true,
+	}
+	cfg := p.Config()
+	if streamReq.Model == "" {
+		streamReq.Model = cfg.Model
+	}
+
+	stream, err := p.Client.CreateChatCompletionStream(ctx, streamReq)
+	if err != nil {
+		return nil, fmt.Errorf("%s stream: %w", p.Name(), err)
+	}
+
+	ch := make(chan core.StreamCompletionResponse, 16)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(ch)
+		defer stream.Close()
+
+		for {
+			select {
+			case <-ctx.Done():
+				ch <- core.StreamCompletionResponse{
+					Model: cfg.Model,
+					Chunk: core.StreamChunk{FinishReason: "cancelled"},
+					Err:   ctx.Err(),
+				}
+				return
+			default:
+			}
+
+			response, err := stream.Recv()
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				ch <- core.StreamCompletionResponse{
+					Model: cfg.Model,
+					Chunk: core.StreamChunk{
+						FinishReason: "error",
+					},
+					Err: fmt.Errorf("%s stream recv: %w", p.Name(), err),
+				}
+				return
+			}
+
+			var usage core.Usage
+			if response.Usage != nil {
+				usage = core.Usage{
+					PromptTokens:     response.Usage.PromptTokens,
+					CompletionTokens: response.Usage.CompletionTokens,
+					TotalTokens:      response.Usage.TotalTokens,
+				}
+			}
+
+			for _, choice := range response.Choices {
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- core.StreamCompletionResponse{
+					ID:    response.ID,
+					Model: response.Model,
+					Chunk: core.StreamChunk{
+						Index: choice.Index,
+						Delta: core.Message{
+							Role:    choice.Delta.Role,
+							Content: choice.Delta.Content,
+						},
+						FinishReason: string(choice.FinishReason),
+					},
+					Usage: usage,
+				}:
+				}
+			}
+		}
+	}()
+
+	return ch, nil
+}
 
 func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (result *core.ChatCompletionResponse, err error) {
 	defer func() {

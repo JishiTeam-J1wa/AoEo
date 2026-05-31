@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestIsRetryableError(t *testing.T) {
@@ -69,5 +70,31 @@ func TestContainsFold(t *testing.T) {
 func TestToLower(t *testing.T) {
 	if toLower('A') != 'a' || toLower('Z') != 'z' || toLower('a') != 'a' || toLower('1') != '1' {
 		t.Fatal("toLower incorrect")
+	}
+}
+
+func TestRetryConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        RetryConfig
+		wantIssues int
+	}{
+		{"valid", RetryConfig{MaxRetries: 2, BaseDelay: time.Second, MaxDelay: 5 * time.Second, Multiplier: 2.0}, 0},
+		{"negative maxRetries", RetryConfig{MaxRetries: -1}, 1},
+		{"negative baseDelay", RetryConfig{BaseDelay: -1 * time.Second}, 1},
+		{"negative maxDelay", RetryConfig{MaxDelay: -1 * time.Second}, 1},
+		{"baseDelay > maxDelay", RetryConfig{BaseDelay: 10 * time.Second, MaxDelay: 5 * time.Second}, 1},
+		{"negative multiplier", RetryConfig{Multiplier: -1}, 1},
+		{"multiple issues", RetryConfig{MaxRetries: -1, BaseDelay: -1 * time.Second, Multiplier: -1}, 3},
+		{"zero values ok", RetryConfig{}, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issues := tt.cfg.Validate()
+			if len(issues) != tt.wantIssues {
+				t.Fatalf("expected %d issues, got %d: %v", tt.wantIssues, len(issues), issues)
+			}
+		})
 	}
 }

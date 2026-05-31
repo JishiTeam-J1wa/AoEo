@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +47,10 @@ func (m *mockProv) ChatComplete(_ context.Context, _ core.ChatCompletionRequest)
 	return &core.ChatCompletionResponse{
 		Choices: []core.Choice{{Message: core.Message{Role: "assistant", Content: "ok"}}},
 	}, nil
+}
+
+func (m *mockProv) ChatCompleteStream(_ context.Context, _ core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	return nil, fmt.Errorf("mock provider does not support streaming")
 }
 
 func TestNewScheduler(t *testing.T) {

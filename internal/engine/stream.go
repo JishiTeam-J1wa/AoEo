@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
-	"github.com/JishiTeam-J1wa/AoEo/providers"
-	"github.com/sashabaranov/go-openai"
 )
 
 // ChatCompleteStream performs a streaming chat completion using the primary provider.
@@ -45,8 +42,15 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
+	// Apply interceptor BeforeRequest hooks.
+	chain := s.interceptorChain()
+	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
+		s.sem.Release()
+		return nil, err
+	}
+
 	streamCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
-	stream, err := chatCompleteStreamWithProvider(streamCtx, p, reqCopy)
+	stream, err := p.ChatCompleteStream(streamCtx, reqCopy)
 	if err != nil {
 		cancel()
 		s.sem.Release()
@@ -54,139 +58,31 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 	}
 
 	// Wrap the stream channel so we release the semaphore when consumption finishes.
-	wrapped := make(chan core.StreamCompletionResponse, cap(stream))
+	// Use a fixed buffer to decouple producer and consumer, preventing goroutine leaks
+	// when the consumer reads slower than the producer.
+	const wrappedBufSize = 16
+	wrapped := make(chan core.StreamCompletionResponse, wrappedBufSize)
 	go func() {
 		defer close(wrapped)
 		defer s.sem.Release()
 		defer cancel()
-		for msg := range stream {
+		for {
 			select {
 			case <-streamCtx.Done():
 				return
-			case wrapped <- msg:
+			case msg, ok := <-stream:
+				if !ok {
+					return
+				}
+				select {
+				case <-streamCtx.Done():
+					return
+				case wrapped <- msg:
+				}
 			}
 		}
 	}()
 	return wrapped, nil
-}
-
-func chatCompleteStreamWithProvider(ctx context.Context, p providers.Provider, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
-	cfg := p.Config()
-
-	var client *openai.Client
-	if op, ok := p.(*providers.OpenAIProvider); ok {
-		client = op.Client
-	} else {
-		oc := openai.DefaultConfig(cfg.APIKey)
-		oc.BaseURL = cfg.Endpoint
-		client = openai.NewClientWithConfig(oc)
-	}
-
-	messages := make([]openai.ChatCompletionMessage, len(req.Messages))
-	for i, m := range req.Messages {
-		messages[i] = openai.ChatCompletionMessage{
-			Role:    m.Role,
-			Content: m.Content,
-		}
-	}
-
-	var respFormat *openai.ChatCompletionResponseFormat
-	if req.ResponseFormat.Type != "" {
-		respFormat = &openai.ChatCompletionResponseFormat{
-			Type: openai.ChatCompletionResponseFormatType(req.ResponseFormat.Type),
-		}
-	}
-
-	streamReq := openai.ChatCompletionRequest{
-		Model:            req.Model,
-		Messages:         messages,
-		Temperature:      req.Temperature,
-		MaxTokens:        req.MaxTokens,
-		TopP:             req.TopP,
-		PresencePenalty:  req.PresencePenalty,
-		FrequencyPenalty: req.FrequencyPenalty,
-		Stop:             req.Stop,
-		Seed:             req.Seed,
-		ResponseFormat:   respFormat,
-		Stream:           true,
-	}
-	if streamReq.Model == "" {
-		streamReq.Model = cfg.Model
-	}
-
-	stream, err := client.CreateChatCompletionStream(ctx, streamReq)
-	if err != nil {
-		return nil, fmt.Errorf("%s stream: %w", p.Name(), err)
-	}
-
-	ch := make(chan core.StreamCompletionResponse, 16)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(ch)
-		defer stream.Close()
-
-		for {
-			select {
-			case <-ctx.Done():
-				ch <- core.StreamCompletionResponse{
-					Model: cfg.Model,
-					Chunk: core.StreamChunk{FinishReason: "cancelled"},
-					Err:   ctx.Err(),
-				}
-				return
-			default:
-			}
-
-			response, err := stream.Recv()
-			if err == io.EOF {
-				return
-			}
-			if err != nil {
-				ch <- core.StreamCompletionResponse{
-					Model: cfg.Model,
-					Chunk: core.StreamChunk{
-						FinishReason: "error",
-					},
-					Err: fmt.Errorf("%s stream recv: %w", p.Name(), err),
-				}
-				return
-			}
-
-			// Map usage if present (typically on the final chunk).
-			var usage core.Usage
-			if response.Usage != nil {
-				usage = core.Usage{
-					PromptTokens:     response.Usage.PromptTokens,
-					CompletionTokens: response.Usage.CompletionTokens,
-					TotalTokens:      response.Usage.TotalTokens,
-				}
-			}
-
-			for _, choice := range response.Choices {
-				select {
-				case <-ctx.Done():
-					return
-				case ch <- core.StreamCompletionResponse{
-					ID:    response.ID,
-					Model: response.Model,
-					Chunk: core.StreamChunk{
-						Index: choice.Index,
-						Delta: core.Message{
-							Role:    choice.Delta.Role,
-							Content: choice.Delta.Content,
-						},
-						FinishReason: string(choice.FinishReason),
-					},
-					Usage: usage,
-				}:
-				}
-			}
-		}
-	}()
-
-	return ch, nil
 }
 
 // ParseSSE parses a raw Server-Sent Events stream into chunks.

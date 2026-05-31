@@ -53,6 +53,10 @@ func (m *mockProvider) SetEmitter(_ core.EventEmitter) {}
 
 func (m *mockProvider) Config() ProviderConfig { return m.config }
 
+func (m *mockProvider) ChatCompleteStream(_ context.Context, _ ChatCompletionRequest) (<-chan StreamCompletionResponse, error) {
+	return nil, fmt.Errorf("mock provider does not support streaming")
+}
+
 func TestNewScheduler(t *testing.T) {
 	p1 := &mockProvider{name: "p1", available: true, config: ProviderConfig{MaxConcurrent: 3}}
 	p2 := &mockProvider{name: "p2", available: true, config: ProviderConfig{MaxConcurrent: 2}}
