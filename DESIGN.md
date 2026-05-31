@@ -495,7 +495,7 @@ type EventEmitter interface {
 | **拦截器** | `BeforeRequest` / `AfterResponse` Hook |
 | **定向代理** | 按 Provider 独立配置 Proxy / HTTPClient |
 | **环境变量配置** | `LoadConfigFromEnv()` 零代码启动 |
-| **测试覆盖** | 201 个单元测试，`-race` 干净 |
+| **测试覆盖** | 230 个单元测试，`-race` 干净，整体覆盖率 71.7% |
 
 ---
 
@@ -565,6 +565,12 @@ scheduler := aoeo.NewScheduler(providers...)
 - [x] 定向 AI API 代理（Proxy / HTTPClient）
 - [x] 拦截器机制（Interceptor Chain）
 - [x] 环境变量配置（`LoadConfigFromEnv`）
+
+### Phase 3.5 — 架构偿债（已完成）
+- [x] Provider 接口新增 `ChatCompleteStream`，解耦 `OpenAIProvider` 类型断言
+- [x] 流式路径支持 `BeforeRequest` interceptor
+- [x] 修复流式 goroutine 泄漏（固定缓冲 + 安全 select）
+- [x] 补全流式 / buildRecord / Client / Retry 测试，覆盖率 66.6% → 71.7%
 
 ### Phase 4 — 生态
 - [ ] Provider 健康检查（定时探测）

@@ -513,3 +513,79 @@ User → Scheduler
 | 新增测试 | 152 |
 | 编译状态 | ✅ 通过 |
 | 测试状态 | ✅ 201/201 通过，`-race` 干净 |
+
+---
+
+## 9. 第九轮审计（2026-05-31）— Phase 3.5 架构偿债
+
+### 9.1 审计动机
+
+第八轮审计报告（`AUDIT_REPORT_V2.md`）识别出三项 Critical 问题：
+1. 流式架构的类型断言耦合（`stream.go:77` `p.(*providers.OpenAIProvider)`）
+2. 流式零测试 + goroutine 泄漏风险
+3. `buildRecord` 计费核心路径零覆盖
+
+本轮目标：偿还这三项技术债务，为 Phase 4 功能扩展扫清障碍。
+
+### 9.2 关键变更
+
+#### 9.2.1 Provider 接口新增 `ChatCompleteStream`
+
+```go
+type Provider interface {
+    // ... existing methods ...
+    ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error)
+}
+```
+
+- `BaseProvider` 提供默认实现（返回 `fmt.Errorf("does not support streaming")`）
+- `OpenAIProvider` 实现完整的流式逻辑，保留 Proxy/TLS/HTTPClient 配置
+- `Scheduler.ChatCompleteStream` 不再使用类型断言，直接调用 `p.ChatCompleteStream()`
+
+**价值**：自定义 Provider（Azure、Vertex、vLLM 等）可独立实现流式，不再被 OpenAI 假设绑架。
+
+#### 9.2.2 流式 interceptor 支持
+
+`Scheduler.ChatCompleteStream` 现在应用 `BeforeRequest` interceptor：
+```go
+if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
+    s.sem.Release()
+    return nil, err
+}
+```
+
+#### 9.2.3 流式 goroutine 泄漏修复
+
+- `wrapped` channel 从 `cap(stream)`（可能为 0）改为固定 `16` 缓冲
+- 生产者 goroutine 使用 `select { case msg, ok := <-stream: ... }` 模式，在 channel 关闭时安全退出
+- 双重 `select` 确保 `streamCtx.Done()` 和 `wrapped <- msg` 都能及时响应
+
+#### 9.2.4 测试补齐
+
+| 新增测试文件 | 测试数 | 覆盖目标 |
+|---|---|---|
+| `internal/engine/stream_test.go` | 8 | 流式基本路径、context cancel、interceptor、慢消费者 |
+| `internal/engine/scheduler_buildrecord_test.go` | 5 | buildRecord、Cost 计算、DefaultPricing 回退、ReqID 递增 |
+| `client_test.go` | 18 | NewClient、Close、SetTimeout、Interceptors、History、Audit、Stream |
+| `core/retry_test.go` | 1 | RetryConfig.Validate 边界值 |
+
+### 9.3 质量指标对比
+
+| 指标 | 第八轮 | 第九轮（本轮） |
+|---|---|---|
+| 测试总数 | 201 | **230** (+29) |
+| 整体覆盖率 | 66.6% | **71.7%** |
+| 根包覆盖率 | 52.4% | **84.5%** |
+| `engine/` 覆盖率 | 70.9% | **80.0%** |
+| Race Detector | ✅ | ✅ |
+| go vet / staticcheck | ✅ | ✅ |
+| examples 编译 | 未检查 | ✅ 全部通过 |
+
+### 9.4 仍建议后续完善
+
+| 问题 | 优先级 | 说明 |
+|---|---|---|
+| Semantic Consensus | 中 | 字符串级 Consensus 误报率高，建议 LLM-as-judge 可选 |
+| Stream `AfterResponse` interceptor | 低 | 流式异步特性导致 AfterResponse 语义不清晰，文档化说明即可 |
+| History 持久化接口 | 中 | 纯内存实现，进程重启丢失 |
+| DefaultPricing 硬编码 | 低 | 价格写死源码，Provider 调价需发版 |

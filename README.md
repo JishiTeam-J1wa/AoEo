@@ -391,7 +391,7 @@ AoEo/
 ├── DESIGN.md
 ├── AUDIT_REPORT.md
 ├── LICENSE
-└── aoeo_test.go       # 201 个单元测试（含 Race Detector）
+└── aoeo_test.go       # 230 个单元测试（含 Race Detector），整体覆盖率 71.7%
 ```
 
 ---
@@ -414,6 +414,13 @@ AoEo/
 - [x] **拦截器机制（BeforeRequest / AfterResponse）**
 - [x] **环境变量配置（`LoadConfigFromEnv`）**
 - [x] **自定义 HTTPClient**
+
+### Phase 3.5 — 架构偿债（已完成）
+- [x] **流式架构重构**：Provider 接口新增 `ChatCompleteStream`，解耦 `OpenAIProvider` 类型断言
+- [x] **流式 interceptor 支持**：`BeforeRequest` 在流式路径生效
+- [x] **流式 goroutine 泄漏修复**：固定缓冲 channel + 安全 select 退出
+- [x] **测试补齐**：流式 8 个 + buildRecord 5 个 + Client 18 个 + Retry Validate
+- [x] **覆盖率提升**：整体 66.6% → 71.7%，根包 52.4% → 84.5%
 
 ### Phase 4 — 生态扩展
 - [ ] 权重路由（按价格/延迟/质量加权选择 Provider）
