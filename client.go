@@ -42,6 +42,7 @@ type (
 	SchedulerOption          = engine.SchedulerOption
 	Interceptor              = core.Interceptor
 	InterceptorChain         = core.InterceptorChain
+	Router                   = core.Router
 	Provider                 = providers.Provider
 )
 
@@ -84,6 +85,8 @@ var (
 	WithRetry                = engine.WithRetry
 	WithPromptInjector       = engine.WithPromptInjector
 	WithInterceptors         = engine.WithInterceptors
+	WithRouter               = engine.WithRouter
+	WithHealthCheckInterval  = engine.WithHealthCheckInterval
 	InjectPrompts            = engine.InjectPrompts
 	WithSystemPromptInjector = engine.WithSystemPromptInjector
 )
@@ -236,6 +239,27 @@ func (c *Client) Interceptors() []core.Interceptor {
 // SetInterceptors replaces the interceptor chain.
 func (c *Client) SetInterceptors(ic []core.Interceptor) {
 	c.scheduler.SetInterceptors(ic)
+}
+
+// Router returns the current router (may be nil).
+func (c *Client) Router() core.Router {
+	return c.scheduler.Router()
+}
+
+// SetRouter replaces the provider selection router.
+func (c *Client) SetRouter(r core.Router) {
+	c.scheduler.SetRouter(r)
+}
+
+// HealthCheckInterval returns the current background health check interval.
+func (c *Client) HealthCheckInterval() time.Duration {
+	return c.scheduler.HealthCheckInterval()
+}
+
+// SetHealthCheckInterval updates the background health check interval.
+// Pass 0 to disable health checks.
+func (c *Client) SetHealthCheckInterval(d time.Duration) {
+	c.scheduler.SetHealthCheckInterval(d)
 }
 
 // Close gracefully shuts down the client. It is safe to call multiple times.

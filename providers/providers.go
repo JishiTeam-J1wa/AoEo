@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
@@ -24,6 +25,7 @@ type Provider interface {
 	IsAvailable() bool
 	ListModels(ctx context.Context) ([]core.ModelInfo, error)
 	SetEmitter(e core.EventEmitter)
+	HealthCheck(ctx context.Context) error
 }
 
 // BaseProvider provides common logic for all providers (circuit breaker, system prompt override).
@@ -32,26 +34,27 @@ type Provider interface {
 type BaseProvider struct {
 	config core.ProviderConfig
 
-	// Circuit breaker: track consecutive failures.
-	failMu    sync.Mutex
-	failCount int
-	failUntil time.Time
+	// Circuit breaker: track consecutive failures (all atomic).
+	failCount atomic.Int32
+	failUntil atomic.Int64 // UnixNano, 0 means not in cooldown
 
-	// System prompt override.
-	sysMu                sync.RWMutex
-	systemPromptOverride string
+	// System prompt override (atomic pointer to string).
+	sysPrompt atomic.Pointer[string]
 
 	// Optional event emitter for provider lifecycle events.
-	emitterMu sync.RWMutex
-	emitter   core.EventEmitter
+	emitter atomic.Value // stores *emitterBox
+}
+
+// emitterBox wraps an EventEmitter so atomic.Value stores a consistently-typed pointer.
+type emitterBox struct {
+	em core.EventEmitter
 }
 
 // NewBaseProvider creates a BaseProvider with the given config.
 func NewBaseProvider(config core.ProviderConfig) *BaseProvider {
-	return &BaseProvider{
-		config:  config,
-		emitter: core.NopEmitter{},
-	}
+	bp := &BaseProvider{config: config}
+	bp.emitter.Store(&emitterBox{em: core.NopEmitter{}})
+	return bp
 }
 
 // Config returns the provider's configuration.
@@ -61,28 +64,25 @@ func (b *BaseProvider) Config() core.ProviderConfig {
 
 // SetEmitter attaches an event emitter to the provider.
 func (b *BaseProvider) SetEmitter(e core.EventEmitter) {
-	b.emitterMu.Lock()
-	defer b.emitterMu.Unlock()
 	if e == nil {
-		b.emitter = core.NopEmitter{}
+		b.emitter.Store(&emitterBox{em: core.NopEmitter{}})
 	} else {
-		b.emitter = e
+		b.emitter.Store(&emitterBox{em: e})
 	}
 }
 
 func (b *BaseProvider) getEmitter() core.EventEmitter {
-	b.emitterMu.RLock()
-	defer b.emitterMu.RUnlock()
-	return b.emitter
+	if box, ok := b.emitter.Load().(*emitterBox); ok {
+		return box.em
+	}
+	return core.NopEmitter{}
 }
 
 // RecordSuccess resets the failure counter on a successful call.
 func (b *BaseProvider) RecordSuccess() {
-	b.failMu.Lock()
-	wasFailed := b.failCount > 0
-	b.failCount = 0
-	b.failUntil = time.Time{}
-	b.failMu.Unlock()
+	wasFailed := b.failCount.Load() > 0
+	b.failCount.Store(0)
+	b.failUntil.Store(0)
 
 	if wasFailed {
 		b.getEmitter().Emit(core.EventProviderRecover, b.config.Name)
@@ -91,8 +91,7 @@ func (b *BaseProvider) RecordSuccess() {
 
 // RecordFailure increments the failure counter and triggers cooldown after MaxFailures consecutive failures.
 func (b *BaseProvider) RecordFailure() {
-	b.failMu.Lock()
-	b.failCount++
+	count := b.failCount.Add(1)
 	maxFailures := b.config.MaxFailures
 	if maxFailures <= 0 {
 		maxFailures = 3
@@ -102,23 +101,22 @@ func (b *BaseProvider) RecordFailure() {
 		cooldown = 60 * time.Second
 	}
 	opened := false
-	if b.failCount >= maxFailures {
-		b.failUntil = time.Now().Add(cooldown)
+	if int(count) >= maxFailures {
+		b.failUntil.Store(time.Now().Add(cooldown).UnixNano())
 		opened = true
 		core.GetLogger().Warn("circuit breaker opened",
 			"provider", b.config.Name,
-			"failCount", b.failCount,
-			"cooldownUntil", b.failUntil.Format(time.RFC3339))
+			"failCount", count,
+			"cooldownUntil", time.Unix(0, b.failUntil.Load()).Format(time.RFC3339))
 	} else {
 		core.GetLogger().Warn("provider failure recorded",
 			"provider", b.config.Name,
-			"failCount", b.failCount)
+			"failCount", count)
 	}
-	b.failMu.Unlock()
 
-	b.getEmitter().Emit(core.EventProviderFail, b.config.Name, b.failCount)
+	b.getEmitter().Emit(core.EventProviderFail, b.config.Name, count)
 	if opened {
-		b.getEmitter().Emit(core.EventProviderOpen, b.config.Name, b.failCount)
+		b.getEmitter().Emit(core.EventProviderOpen, b.config.Name, count)
 	}
 }
 
@@ -128,10 +126,44 @@ func (b *BaseProvider) IsAvailable() bool {
 	if b.config.APIKey == "" || b.config.Endpoint == "" || b.config.Model == "" {
 		return false
 	}
-	b.failMu.Lock()
-	cooldown := b.failUntil.After(time.Now())
-	b.failMu.Unlock()
-	return !cooldown
+	until := b.failUntil.Load()
+	if until == 0 {
+		return true
+	}
+	return time.Now().UnixNano() >= until
+}
+
+// HealthCheck performs a lightweight connectivity check to the provider endpoint.
+// It uses a 5-second timeout and does a simple HTTP GET to the base URL.
+func (b *BaseProvider) HealthCheck(ctx context.Context) error {
+	if b.config.APIKey == "" || b.config.Endpoint == "" {
+		return fmt.Errorf("provider %s config incomplete", b.config.Name)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	if b.config.HTTPClient != nil {
+		client = b.config.HTTPClient
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, b.config.Endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("health check request for %s: %w", b.config.Name, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+b.config.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("health check failed for %s: %w", b.config.Name, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("health check for %s returned status %d", b.config.Name, resp.StatusCode)
+	}
+	return nil
 }
 
 // ListModels fetches the list of available models from the provider via the
@@ -162,24 +194,20 @@ func (b *BaseProvider) ListModels(ctx context.Context) ([]core.ModelInfo, error)
 
 // SetSystemPrompt sets an override system prompt for the next completion call.
 func (b *BaseProvider) SetSystemPrompt(prompt string) {
-	b.sysMu.Lock()
-	b.systemPromptOverride = prompt
-	b.sysMu.Unlock()
+	b.sysPrompt.Store(&prompt)
 }
 
 // ClearSystemPrompt removes the system prompt override.
 func (b *BaseProvider) ClearSystemPrompt() {
-	b.sysMu.Lock()
-	b.systemPromptOverride = ""
-	b.sysMu.Unlock()
+	b.sysPrompt.Store(nil)
 }
 
 // GetSystemPrompt returns the override if set, otherwise empty.
 func (b *BaseProvider) GetSystemPrompt() string {
-	b.sysMu.RLock()
-	override := b.systemPromptOverride
-	b.sysMu.RUnlock()
-	return override
+	if ptr := b.sysPrompt.Load(); ptr != nil {
+		return *ptr
+	}
+	return ""
 }
 
 // ChatCompleteStream provides a default implementation that returns an error.
@@ -593,14 +621,17 @@ func (b *BaseProvider) Close() error { return nil }
 
 // FailUntil returns the circuit breaker cooldown deadline (zero if not active).
 func (b *BaseProvider) FailUntil() time.Time {
-	b.failMu.Lock()
-	defer b.failMu.Unlock()
-	return b.failUntil
+	if until := b.failUntil.Load(); until != 0 {
+		return time.Unix(0, until)
+	}
+	return time.Time{}
 }
 
 // SetFailUntil sets the circuit breaker cooldown deadline (for testing).
 func (b *BaseProvider) SetFailUntil(t time.Time) {
-	b.failMu.Lock()
-	defer b.failMu.Unlock()
-	b.failUntil = t
+	if t.IsZero() {
+		b.failUntil.Store(0)
+	} else {
+		b.failUntil.Store(t.UnixNano())
+	}
 }

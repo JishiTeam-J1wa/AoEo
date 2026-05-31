@@ -45,6 +45,21 @@ func WithInterceptors(ic ...core.Interceptor) SchedulerOption {
 	}
 }
 
+// WithRouter sets the provider selection router.
+func WithRouter(r core.Router) SchedulerOption {
+	return func(s *Scheduler) {
+		s.router.Store(&r)
+	}
+}
+
+// WithHealthCheckInterval sets the background health check interval.
+// Pass 0 to disable health checks.
+func WithHealthCheckInterval(d time.Duration) SchedulerOption {
+	return func(s *Scheduler) {
+		s.healthCheckInterval.Store(int64(d))
+	}
+}
+
 // Sentinel errors for SDK consumers to use with errors.Is().
 var (
 	ErrSchedulerClosed          = errors.New("scheduler is closed")
@@ -85,6 +100,9 @@ type Scheduler struct {
 	// Optional interceptors.
 	interceptors atomic.Pointer[[]core.Interceptor]
 
+	// Optional router for provider selection strategy.
+	router atomic.Pointer[core.Router]
+
 	// Cached available providers (refreshed on access if stale).
 	availCache    atomic.Pointer[availCacheEntry]
 	availCacheTTL time.Duration
@@ -95,6 +113,12 @@ type Scheduler struct {
 
 	// Unique request ID counter.
 	reqID atomic.Uint64
+
+	// Background health check.
+	healthCheckInterval atomic.Int64 // nanoseconds, 0 = disabled
+	healthCheckMu       sync.Mutex
+	healthCheckStop     chan struct{}
+	healthCheckWG       sync.WaitGroup
 }
 
 // NewScheduler creates a new scheduler with the given providers.
@@ -193,8 +217,9 @@ func (s *Scheduler) checkClosed() error {
 	return nil
 }
 
-// Close marks the scheduler as closed and attempts to close all providers
-// that implement io.Closer. It is safe to call multiple times (idempotent).
+// Close marks the scheduler as closed, stops background health checks,
+// and attempts to close all providers that implement io.Closer.
+// It is safe to call multiple times (idempotent).
 // If any provider close fails, the first error is returned.
 func (s *Scheduler) Close() error {
 	s.closeMu.Lock()
@@ -203,6 +228,8 @@ func (s *Scheduler) Close() error {
 	if s.closed.Swap(true) {
 		return nil
 	}
+
+	s.stopHealthCheck()
 
 	s.mu.RLock()
 	allProvs := s.providers
@@ -219,6 +246,87 @@ func (s *Scheduler) Close() error {
 	return firstErr
 }
 
+// StartHealthCheck starts a background goroutine that periodically health-checks
+// all providers. If a health check is already running, it is stopped and restarted
+// with the new interval. Pass 0 to disable.
+func (s *Scheduler) StartHealthCheck(interval time.Duration) {
+	s.healthCheckMu.Lock()
+	defer s.healthCheckMu.Unlock()
+
+	// Stop existing loop if any.
+	s.stopHealthCheckLocked()
+
+	if interval <= 0 {
+		s.healthCheckInterval.Store(0)
+		return
+	}
+	s.healthCheckInterval.Store(int64(interval))
+	stopCh := make(chan struct{})
+	s.healthCheckStop = stopCh
+	s.healthCheckWG.Add(1)
+	go s.healthCheckLoop(interval, stopCh)
+}
+
+func (s *Scheduler) stopHealthCheck() {
+	s.healthCheckMu.Lock()
+	defer s.healthCheckMu.Unlock()
+	s.stopHealthCheckLocked()
+}
+
+func (s *Scheduler) stopHealthCheckLocked() {
+	if s.healthCheckStop != nil {
+		close(s.healthCheckStop)
+		s.healthCheckStop = nil
+	}
+	s.healthCheckWG.Wait()
+}
+
+func (s *Scheduler) healthCheckLoop(interval time.Duration, stop <-chan struct{}) {
+	defer s.healthCheckWG.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.runHealthChecks()
+		case <-stop:
+			return
+		}
+	}
+}
+
+// circuitBreaker is the subset of BaseProvider methods needed by the scheduler.
+type circuitBreaker interface {
+	RecordFailure()
+	RecordSuccess()
+}
+
+func (s *Scheduler) runHealthChecks() {
+	s.mu.RLock()
+	provs := make([]providers.Provider, len(s.providers))
+	copy(provs, s.providers)
+	s.mu.RUnlock()
+
+	for _, p := range provs {
+		if s.closed.Load() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := p.HealthCheck(ctx); err != nil {
+			core.GetLogger().Debug("health check failed", "provider", p.Name(), "error", err)
+			if cb, ok := p.(circuitBreaker); ok {
+				cb.RecordFailure()
+			}
+		} else {
+			if cb, ok := p.(circuitBreaker); ok {
+				cb.RecordSuccess()
+			}
+		}
+		cancel()
+	}
+}
+
 // ChatComplete performs a chat completion using the primary (first available) provider.
 func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
 	if err := s.checkClosed(); err != nil {
@@ -229,9 +337,9 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 	}
 	defer s.sem.Release()
 
-	p := s.PickPrimaryProvider()
-	if p == nil {
-		return nil, ErrNoAvailableProvider
+	p, err := s.pickWithRouter(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 
 	// Fill default model from provider config if not specified.
@@ -305,9 +413,27 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 		resp, err = chain.ApplyAfter(ctx, req, resp, err)
 	}()
 
+	// Determine fallback order via router if available.
+	var order []providers.Provider
+	if r := s.router.Load(); r != nil {
+		status := s.ProviderStatus()
+		if seq, rerr := (*r).SelectSequence(ctx, status, req); rerr == nil && len(seq) > 0 {
+			s.mu.RLock()
+			for _, idx := range seq {
+				if idx >= 0 && idx < len(s.providers) {
+					order = append(order, s.providers[idx])
+				}
+			}
+			s.mu.RUnlock()
+		}
+	}
+	if len(order) == 0 {
+		order = available
+	}
+
 	var lastErr error
 	var fallbackFrom string
-	for i, p := range available {
+	for i, p := range order {
 		if err := s.sem.Acquire(ctx); err != nil {
 			return nil, err
 		}
@@ -382,16 +508,41 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 		return nil, err
 	}
 
-	p1 := s.PickProviderRoundRobin()
+	// Use router to pick two distinct providers if available.
+	var p1, p2 providers.Provider
+	if r := s.router.Load(); r != nil {
+		status := s.ProviderStatus()
+		if seq, rerr := (*r).SelectSequence(ctx, status, req); rerr == nil && len(seq) >= 2 {
+			s.mu.RLock()
+			for _, idx := range seq {
+				if idx < 0 || idx >= len(s.providers) {
+					continue
+				}
+				candidate := s.providers[idx]
+				if p1 == nil {
+					p1 = candidate
+				} else if candidate.Name() != p1.Name() {
+					p2 = candidate
+					break
+				}
+			}
+			s.mu.RUnlock()
+		}
+	}
+
+	// Fallback to round-robin if router didn't yield two distinct providers.
+	if p1 == nil {
+		p1 = s.PickProviderRoundRobin()
+	}
 	if p1 == nil {
 		return nil, ErrNoAvailableProvider
 	}
-
-	var p2 providers.Provider
-	for attempt := 0; attempt < len(available)*2 && p2 == nil; attempt++ {
-		candidate := s.PickProviderRoundRobin()
-		if candidate != nil && candidate.Name() != p1.Name() {
-			p2 = candidate
+	if p2 == nil {
+		for attempt := 0; attempt < len(available)*2 && p2 == nil; attempt++ {
+			candidate := s.PickProviderRoundRobin()
+			if candidate != nil && candidate.Name() != p1.Name() {
+				p2 = candidate
+			}
 		}
 	}
 
@@ -527,7 +678,7 @@ func (s *Scheduler) AvailableProviders() []providers.Provider {
 	return copyProviders(available)
 }
 
-// pickPrimaryProvider returns the first available provider (user's designated primary).
+// PickPrimaryProvider returns the first available provider (user's designated primary).
 func (s *Scheduler) PickPrimaryProvider() providers.Provider {
 	available := s.AvailableProviders()
 	if len(available) == 0 {
@@ -536,7 +687,7 @@ func (s *Scheduler) PickPrimaryProvider() providers.Provider {
 	return available[0]
 }
 
-// pickProviderRoundRobin selects the next available provider using round-robin.
+// PickProviderRoundRobin selects the next available provider using round-robin.
 func (s *Scheduler) PickProviderRoundRobin() providers.Provider {
 	available := s.AvailableProviders()
 	if len(available) == 0 {
@@ -545,6 +696,37 @@ func (s *Scheduler) PickProviderRoundRobin() providers.Provider {
 	newVal := atomic.AddUint64(&s.rrIndex, 1)
 	idx := (newVal - 1) % uint64(len(available))
 	return available[idx]
+}
+
+// pickWithRouter applies the configured router to select a provider.
+// Falls back to primary selection if no router is set.
+func (s *Scheduler) pickWithRouter(ctx context.Context, req core.ChatCompletionRequest) (providers.Provider, error) {
+	status := s.ProviderStatus()
+	var availableIdx []int
+	for i, st := range status {
+		if st.Available {
+			availableIdx = append(availableIdx, i)
+		}
+	}
+	if len(availableIdx) == 0 {
+		return nil, ErrNoAvailableProvider
+	}
+
+	if r := s.router.Load(); r != nil {
+		idx, err := (*r).Select(ctx, status, req)
+		if err == nil && idx >= 0 && idx < len(status) && status[idx].Available {
+			s.mu.RLock()
+			p := s.providers[idx]
+			s.mu.RUnlock()
+			return p, nil
+		}
+	}
+
+	// Fallback to primary (first available).
+	s.mu.RLock()
+	p := s.providers[availableIdx[0]]
+	s.mu.RUnlock()
+	return p, nil
 }
 
 // core.ProviderStatus returns the runtime status of each configured provider.
@@ -737,4 +919,32 @@ func (s *Scheduler) interceptorChain() core.InterceptorChain {
 		return core.InterceptorChain(*ptr)
 	}
 	return nil
+}
+
+// Router returns the current router (may be nil).
+func (s *Scheduler) Router() core.Router {
+	if r := s.router.Load(); r != nil {
+		return *r
+	}
+	return nil
+}
+
+// SetRouter replaces the provider selection router.
+func (s *Scheduler) SetRouter(r core.Router) {
+	if r == nil {
+		s.router.Store(nil)
+	} else {
+		s.router.Store(&r)
+	}
+}
+
+// HealthCheckInterval returns the current health check interval.
+func (s *Scheduler) HealthCheckInterval() time.Duration {
+	return time.Duration(s.healthCheckInterval.Load())
+}
+
+// SetHealthCheckInterval updates the health check interval and restarts
+// the background health checker. Pass 0 to disable.
+func (s *Scheduler) SetHealthCheckInterval(d time.Duration) {
+	s.StartHealthCheck(d)
 }

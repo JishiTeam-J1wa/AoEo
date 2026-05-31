@@ -62,7 +62,7 @@
 ┌─────────▼──────────────────────────────────────────────────┐
 │                      Scheduler                               │
 │  ┌──────────────┐  ┌─────────────┐  ┌────────────────────┐  │
-│  │pickPrimary() │  │pickRoundRobin│  │Adaptive Semaphore  │  │
+│  │    Router    │  │HealthCheck  │  │Adaptive Semaphore  │  │
 │  └──────────────┘  └─────────────┘  └────────────────────┘  │
 │  ┌──────────────┐  ┌─────────────┐  ┌────────────────────┐  │
 │  │Circuit Breaker│  │ProviderStatus│  │PromptInjector      │  │
@@ -224,27 +224,81 @@ type ProviderStats struct {
 - 支持按标签过滤历史记录
 - `Currency` 由首次见到的记录价格决定，保持单 Provider 单币种语义
 
-#### 2.2.8 Interceptor — 请求/响应拦截器
+#### 2.2.8 Interceptor — 请求/响应/流式拦截器
 
 ```go
 type Interceptor struct {
-    BeforeRequest func(ctx context.Context, req *ChatCompletionRequest) error
-    AfterResponse func(ctx context.Context, req ChatCompletionRequest, resp *ChatCompletionResponse, err error) (*ChatCompletionResponse, error)
+    BeforeRequest    func(ctx context.Context, req *ChatCompletionRequest) error
+    AfterResponse    func(ctx context.Context, req ChatCompletionRequest, resp *ChatCompletionResponse, err error) (*ChatCompletionResponse, error)
+    AfterStreamChunk func(ctx context.Context, req ChatCompletionRequest, chunk *StreamChunk) error
+    AfterStreamDone  func(ctx context.Context, req ChatCompletionRequest, err error) error
 }
 ```
 
 **职责**：
 - `BeforeRequest`：请求发送前执行，可修改请求或中止调用
 - `AfterResponse`：Provider 返回后执行，可转换响应/错误
+- `AfterStreamChunk`：流式响应每个 chunk 转发前执行，可修改 chunk 或中止流
+- `AfterStreamDone`：流式响应结束时执行，用于清理/日志/统计
 
 **设计决策**：
 - 链式执行，多个拦截器按注册顺序调用
-- `BeforeRequest` 遇到错误立即短路，不再继续后续拦截器和 Provider 调用
-- `AfterResponse` 每个钩子可修改返回值，对调用方完全透明
+- `BeforeRequest` / `AfterStreamChunk` 遇到错误立即短路
+- `AfterResponse` / `AfterStreamDone` 每个钩子可修改返回值，对调用方完全透明
 - 使用 `atomic.Pointer[[]Interceptor]` 保证线程安全，支持运行时动态替换
 - 与 Scheduler 解耦：拦截器属于调度选项，不影响 Provider 实现
 
-#### 2.2.9 Proxy / HTTPClient — 网络层定制
+#### 2.2.9 Router — 可插拔路由策略
+
+```go
+type Router interface {
+    Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error)
+    SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error)
+}
+```
+
+**内置策略**：
+
+| 策略 | 实现 | 特点 |
+|---|---|---|
+| PrimaryRouter | 选第一个可用 | 默认行为，零开销 |
+| RoundRobinRouter | `atomic.Uint64` 轮询 | O(1)，自动跳过不可用 |
+| RandomRouter | `math/rand` 随机 | 简单负载分散 |
+
+**设计决策**：
+- `Select` 用于单次调用（`ChatComplete`）
+- `SelectSequence` 用于 Fallback / Dual 的 Provider 排序
+- 使用 `atomic.Pointer[core.Router]` 支持运行时热切换
+- Scheduler 的 `PickPrimaryProvider` / `PickProviderRoundRobin` 保留为兼容方法，内部委托给 Router
+
+#### 2.2.10 HealthCheck — 后台探活
+
+Provider 接口新增 `HealthCheck(ctx) error`：
+
+```go
+type Provider interface {
+    // ...
+    HealthCheck(ctx context.Context) error
+}
+```
+
+- `BaseProvider` 默认实现：HTTP GET Endpoint（5s 超时）
+- `OpenAIProvider` 可覆盖为更具体的检查（如轻量 ListModels）
+
+Scheduler 后台 goroutine：
+
+```go
+s.StartHealthCheck(30 * time.Second) // 每 30s 探测一次
+s.SetHealthCheckInterval(0)          // 关闭探测
+```
+
+**设计决策**：
+- 默认关闭，避免测试/短生命周期场景泄漏 goroutine
+- 失败调用 `RecordFailure()`，成功调用 `RecordSuccess()`，复用熔断器逻辑
+- 关闭 Scheduler 时自动 `stopHealthCheck()`，通过 `sync.WaitGroup` 保证 goroutine 退出
+- `healthCheckStop` 通道通过参数传递给 goroutine，避免 data race
+
+#### 2.2.11 Proxy / HTTPClient — 网络层定制
 
 每个 Provider 独立配置网络出口：
 
@@ -262,7 +316,7 @@ type ProviderConfig struct {
 - 若提供了自定义 `HTTPClient`，保留其 `CheckRedirect`/`Jar`，覆盖 Transport 上的 `Proxy` 和 `TLSConfig`
 - 支持 `SkipTLSVerify` 与自定义 Transport 共存
 
-#### 2.2.10 EnvConfig — 环境变量配置源
+#### 2.2.12 EnvConfig — 环境变量配置源
 
 ```go
 cfg := aoeo.LoadConfigFromEnv()
@@ -339,14 +393,22 @@ User → Client.Audit()
 ```
 User → Client.ChatCompleteStream()
   ├── Scheduler acquire sem
+  ├── Router.Select() → pick provider
   ├── PromptInjector.Inject()
-  └── chatCompleteStreamWithProvider()
-        ├── OpenAIProvider.client.CreateChatCompletionStream()
-        └── goroutine: for each SSE chunk → select { case wrapped <- msg; case <-ctx.Done(): return }
+  ├── InterceptorChain.ApplyBefore()
+  └── p.ChatCompleteStream() (Provider 接口)
+        └── goroutine:
+              ├── for each chunk:
+              │     ├── InterceptorChain.ApplyAfterStreamChunk()
+              │     └── select { case wrapped <- msg; case <-ctx.Done(): return }
+              └── defer InterceptorChain.ApplyAfterStreamDone()
 ```
 
-- 通过类型断言复用 `OpenAIProvider.client` 的 SSE 能力
-- goroutine 包装 channel，内部通过 `select ctx.Done()` 实现 graceful cancel
+- Provider 接口原生支持 `ChatCompleteStream`，无需类型断言
+- `OpenAIProvider` 使用底层 `go-openai` SSE 能力，其他 Provider 可自定义实现
+- goroutine 包装 channel，固定缓冲（16）解耦生产/消费速率
+- 流式拦截器 `AfterStreamChunk` 可在每个 chunk 转发前修改或中止
+- `AfterStreamDone` 在流结束时触发，用于统计/清理
 - 消费端提前 break 时，应同时 cancel ctx 以确保 goroutine 退出
 
 ---
@@ -568,12 +630,15 @@ scheduler := aoeo.NewScheduler(providers...)
 
 ### Phase 3.5 — 架构偿债（已完成）
 - [x] Provider 接口新增 `ChatCompleteStream`，解耦 `OpenAIProvider` 类型断言
-- [x] 流式路径支持 `BeforeRequest` interceptor
+- [x] 流式路径支持 `BeforeRequest` / `AfterStreamChunk` / `AfterStreamDone` interceptor
 - [x] 修复流式 goroutine 泄漏（固定缓冲 + 安全 select）
-- [x] 补全流式 / buildRecord / Client / Retry 测试，覆盖率 66.6% → 71.7%
+- [x] History Ring Buffer 重构（O(maxSize) 恒定空间，消除 append realloc）
+- [x] BaseProvider 原子化（`failCount` / `failUntil` / `emitter` 全部原子操作）
+- [x] Router 接口抽象（`PrimaryRouter` / `RoundRobinRouter` / `RandomRouter`，热切换）
+- [x] Provider 后台健康检查（`HealthCheck` 接口 + 定时 goroutine，复用熔断器）
+- [x] 补全流式 / buildRecord / Client / Retry / Router / HealthCheck 测试，覆盖率 71.7% → 70.8%
 
 ### Phase 4 — 生态
-- [ ] Provider 健康检查（定时探测）
 - [ ] 权重路由（按价格/速度/质量加权）
 - [ ] CLI 工具（`aoeo list-models`, `aoeo test`）
 - [ ] 与 Langfuse / LangSmith 集成

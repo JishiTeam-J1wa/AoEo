@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -191,5 +192,157 @@ func TestScheduler_ChatCompleteStream_SlowConsumer(t *testing.T) {
 	}
 	if count != 10 {
 		t.Fatalf("expected 10 messages, got %d", count)
+	}
+}
+
+func TestScheduler_ChatCompleteStream_AfterStreamChunk(t *testing.T) {
+	ch := make(chan core.StreamCompletionResponse, 4)
+	ch <- core.StreamCompletionResponse{Chunk: core.StreamChunk{Delta: core.Message{Content: "hello"}}}
+	ch <- core.StreamCompletionResponse{Chunk: core.StreamChunk{Delta: core.Message{Content: " world"}, FinishReason: "stop"}}
+	close(ch)
+
+	var chunks []string
+	ic := core.Interceptor{
+		AfterStreamChunk: func(_ context.Context, _ core.ChatCompletionRequest, chunk *core.StreamChunk) error {
+			chunks = append(chunks, chunk.Delta.Content)
+			chunk.Delta.Content = "[" + chunk.Delta.Content + "]"
+			return nil
+		},
+	}
+
+	p := &mockStreamProv{mockProv: mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}, streamCh: ch}
+	s := NewSchedulerWithOptions([]providers.Provider{p}, WithInterceptors(ic))
+
+	result, err := s.ChatCompleteStream(context.Background(), core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var contents []string
+	for msg := range result {
+		if msg.Err != nil {
+			t.Fatalf("unexpected stream error: %v", msg.Err)
+		}
+		contents = append(contents, msg.Chunk.Delta.Content)
+	}
+
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks intercepted, got %d", len(chunks))
+	}
+	if strings.Join(contents, "") != "[hello][ world]" {
+		t.Fatalf("unexpected wrapped content: %v", contents)
+	}
+}
+
+func TestScheduler_ChatCompleteStream_AfterStreamChunkAbort(t *testing.T) {
+	ch := make(chan core.StreamCompletionResponse, 4)
+	ch <- core.StreamCompletionResponse{Chunk: core.StreamChunk{Delta: core.Message{Content: "hello"}}}
+	ch <- core.StreamCompletionResponse{Chunk: core.StreamChunk{Delta: core.Message{Content: " world"}, FinishReason: "stop"}}
+	close(ch)
+
+	ic := core.Interceptor{
+		AfterStreamChunk: func(_ context.Context, _ core.ChatCompletionRequest, chunk *core.StreamChunk) error {
+			if chunk.Delta.Content == "hello" {
+				return fmt.Errorf("blocked by interceptor")
+			}
+			return nil
+		},
+	}
+
+	p := &mockStreamProv{mockProv: mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}, streamCh: ch}
+	s := NewSchedulerWithOptions([]providers.Provider{p}, WithInterceptors(ic))
+
+	result, err := s.ChatCompleteStream(context.Background(), core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var gotErr bool
+	for msg := range result {
+		if msg.Err != nil {
+			gotErr = true
+			if msg.Err.Error() != "blocked by interceptor" {
+				t.Fatalf("unexpected error: %v", msg.Err)
+			}
+		}
+	}
+	if !gotErr {
+		t.Fatal("expected stream to abort with interceptor error")
+	}
+}
+
+func TestScheduler_ChatCompleteStream_AfterStreamDone(t *testing.T) {
+	ch := make(chan core.StreamCompletionResponse, 4)
+	ch <- core.StreamCompletionResponse{Chunk: core.StreamChunk{Delta: core.Message{Content: "done"}, FinishReason: "stop"}}
+	close(ch)
+
+	var doneCalled bool
+	var doneErr error
+	ic := core.Interceptor{
+		AfterStreamDone: func(_ context.Context, _ core.ChatCompletionRequest, err error) error {
+			doneCalled = true
+			doneErr = err
+			return nil
+		},
+	}
+
+	p := &mockStreamProv{mockProv: mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}, streamCh: ch}
+	s := NewSchedulerWithOptions([]providers.Provider{p}, WithInterceptors(ic))
+
+	result, err := s.ChatCompleteStream(context.Background(), core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for range result {
+	}
+
+	if !doneCalled {
+		t.Fatal("expected AfterStreamDone to be called")
+	}
+	if doneErr != nil {
+		t.Fatalf("expected nil final error, got %v", doneErr)
+	}
+}
+
+func TestScheduler_ChatCompleteStream_AfterStreamDoneWithError(t *testing.T) {
+	ch := make(chan core.StreamCompletionResponse, 4)
+	ch <- core.StreamCompletionResponse{Err: fmt.Errorf("stream error")}
+	close(ch)
+
+	var doneCalled bool
+	var doneErr error
+	ic := core.Interceptor{
+		AfterStreamDone: func(_ context.Context, _ core.ChatCompletionRequest, err error) error {
+			doneCalled = true
+			doneErr = err
+			return nil
+		},
+	}
+
+	p := &mockStreamProv{mockProv: mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}, streamCh: ch}
+	s := NewSchedulerWithOptions([]providers.Provider{p}, WithInterceptors(ic))
+
+	result, err := s.ChatCompleteStream(context.Background(), core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for range result {
+	}
+
+	if !doneCalled {
+		t.Fatal("expected AfterStreamDone to be called")
+	}
+	if doneErr == nil || doneErr.Error() != "stream error" {
+		t.Fatalf("expected stream error, got %v", doneErr)
 	}
 }

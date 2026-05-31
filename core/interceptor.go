@@ -20,6 +20,17 @@ type Interceptor struct {
 	// and the error (may be nil on success). It may return a modified
 	// response/error pair.
 	AfterResponse func(ctx context.Context, req ChatCompletionRequest, resp *ChatCompletionResponse, err error) (*ChatCompletionResponse, error)
+
+	// AfterStreamChunk is called for each chunk in a streaming response
+	// before it is forwarded to the consumer. It receives the chunk by
+	// pointer and may modify it in place. Returning a non-nil error aborts
+	// the stream and sends an error chunk to the consumer.
+	AfterStreamChunk func(ctx context.Context, req ChatCompletionRequest, chunk *StreamChunk) error
+
+	// AfterStreamDone is called when a streaming response completes,
+	// either normally or due to an error. It receives the original request
+	// and any final error (nil on normal completion).
+	AfterStreamDone func(ctx context.Context, req ChatCompletionRequest, err error) error
 }
 
 // InterceptorChain executes a slice of interceptors in order.
@@ -50,4 +61,32 @@ func (chain InterceptorChain) ApplyAfter(ctx context.Context, req ChatCompletion
 		resp, err = ic.AfterResponse(ctx, req, resp, err)
 	}
 	return resp, err
+}
+
+// ApplyAfterStreamChunk runs all AfterStreamChunk hooks in order.
+// The first error short-circuits the chain and is returned.
+func (chain InterceptorChain) ApplyAfterStreamChunk(ctx context.Context, req ChatCompletionRequest, chunk *StreamChunk) error {
+	for _, ic := range chain {
+		if ic.AfterStreamChunk == nil {
+			continue
+		}
+		if err := ic.AfterStreamChunk(ctx, req, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ApplyAfterStreamDone runs all AfterStreamDone hooks in order.
+// Each hook may transform the final error.
+func (chain InterceptorChain) ApplyAfterStreamDone(ctx context.Context, req ChatCompletionRequest, err error) error {
+	for _, ic := range chain {
+		if ic.AfterStreamDone == nil {
+			continue
+		}
+		if e := ic.AfterStreamDone(ctx, req, err); e != nil {
+			err = e
+		}
+	}
+	return err
 }

@@ -66,12 +66,37 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		defer close(wrapped)
 		defer s.sem.Release()
 		defer cancel()
+		var finalErr error
+		defer func() {
+			if err := chain.ApplyAfterStreamDone(streamCtx, reqCopy, finalErr); err != nil {
+				core.GetLogger().Debug("AfterStreamDone error", "error", err)
+			}
+		}()
 		for {
 			select {
 			case <-streamCtx.Done():
+				finalErr = streamCtx.Err()
 				return
 			case msg, ok := <-stream:
 				if !ok {
+					return
+				}
+				if msg.Err != nil {
+					finalErr = msg.Err
+					select {
+					case <-streamCtx.Done():
+						return
+					case wrapped <- msg:
+					}
+					return
+				}
+				if err := chain.ApplyAfterStreamChunk(streamCtx, reqCopy, &msg.Chunk); err != nil {
+					finalErr = err
+					select {
+					case <-streamCtx.Done():
+						return
+					case wrapped <- core.StreamCompletionResponse{Err: err}:
+					}
 					return
 				}
 				select {

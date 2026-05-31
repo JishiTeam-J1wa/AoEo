@@ -136,3 +136,75 @@ func TestCallRecord_ZeroValue(t *testing.T) {
 		t.Fatal("zero value CallRecord should be empty")
 	}
 }
+
+func TestHistory_RingBuffer_WrapAround(t *testing.T) {
+	h := NewHistory(3)
+	h.Record(CallRecord{Provider: "p1"})
+	h.Record(CallRecord{Provider: "p2"})
+	h.Record(CallRecord{Provider: "p3"})
+	h.Record(CallRecord{Provider: "p4"}) // overwrites p1
+
+	records := h.Records()
+	if len(records) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(records))
+	}
+	if records[0].Provider != "p4" || records[1].Provider != "p3" || records[2].Provider != "p2" {
+		t.Fatalf("expected p4,p3,p2, got %v", []string{records[0].Provider, records[1].Provider, records[2].Provider})
+	}
+}
+
+func TestHistory_RingBuffer_MaxSizeOne(t *testing.T) {
+	h := NewHistory(1)
+	h.Record(CallRecord{Provider: "p1"})
+	h.Record(CallRecord{Provider: "p2"})
+
+	records := h.Records()
+	if len(records) != 1 || records[0].Provider != "p2" {
+		t.Fatalf("expected single p2, got %v", records)
+	}
+}
+
+func TestHistory_RingBuffer_ClearAfterWrap(t *testing.T) {
+	h := NewHistory(2)
+	h.Record(CallRecord{Provider: "p1"})
+	h.Record(CallRecord{Provider: "p2"})
+	h.Record(CallRecord{Provider: "p3"})
+	h.Clear()
+
+	if len(h.Records()) != 0 {
+		t.Fatal("expected empty after clear")
+	}
+	// Verify we can write again after clear
+	h.Record(CallRecord{Provider: "p4"})
+	records := h.Records()
+	if len(records) != 1 || records[0].Provider != "p4" {
+		t.Fatalf("expected p4 after re-write, got %v", records)
+	}
+}
+
+func TestHistory_RingBuffer_RecordsByTagAfterWrap(t *testing.T) {
+	h := NewHistory(2)
+	h.Record(CallRecord{Provider: "p1", Tags: []string{"a"}})
+	h.Record(CallRecord{Provider: "p2", Tags: []string{"a"}})
+	h.Record(CallRecord{Provider: "p3", Tags: []string{"b"}}) // overwrites p1
+
+	 tagged := h.RecordsByTag("a")
+	if len(tagged) != 1 || tagged[0].Provider != "p2" {
+		t.Fatalf("expected only p2 tagged a, got %v", tagged)
+	}
+}
+
+func TestHistory_RingBuffer_StatsAfterWrap(t *testing.T) {
+	h := NewHistory(2)
+	h.Record(CallRecord{Provider: "p1", LatencyMs: 100, Cost: 1.0})
+	h.Record(CallRecord{Provider: "p2", LatencyMs: 200, Cost: 2.0})
+	h.Record(CallRecord{Provider: "p3", LatencyMs: 300, Cost: 3.0}) // overwrites p1
+
+	stats := h.Stats()
+	if _, ok := stats["p1"]; ok {
+		t.Fatal("p1 should have been overwritten")
+	}
+	if stats["p3"].TotalCalls != 1 || stats["p3"].TotalCost != 3.0 {
+		t.Fatalf("unexpected p3 stats: %+v", stats["p3"])
+	}
+}

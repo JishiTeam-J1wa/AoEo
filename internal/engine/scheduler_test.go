@@ -52,6 +52,12 @@ func (m *mockProv) ChatComplete(_ context.Context, _ core.ChatCompletionRequest)
 func (m *mockProv) ChatCompleteStream(_ context.Context, _ core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
 	return nil, fmt.Errorf("mock provider does not support streaming")
 }
+func (m *mockProv) HealthCheck(_ context.Context) error {
+	if m.available {
+		return nil
+	}
+	return fmt.Errorf("mock provider %s unhealthy", m.name)
+}
 
 func TestNewScheduler(t *testing.T) {
 	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 3}}
@@ -578,5 +584,195 @@ func TestScheduler_DualWithInterceptors(t *testing.T) {
 	}
 	if !beforeCalled {
 		t.Fatal("expected BeforeRequest to be called for dual")
+	}
+}
+
+func TestScheduler_RouterRoundRobin(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p1"}}},
+	}}
+	p2 := &mockProv{name: "p2", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m2"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p2"}}},
+	}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1, p2}, WithRouter(&core.RoundRobinRouter{}))
+
+	resp1, err := s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if resp1.Choices[0].Message.Content != "p1" {
+		t.Fatalf("expected p1 first (RR starts at 0), got %s", resp1.Choices[0].Message.Content)
+	}
+
+	resp2, err := s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if resp2.Choices[0].Message.Content != "p2" {
+		t.Fatalf("expected p2 second, got %s", resp2.Choices[0].Message.Content)
+	}
+}
+
+func TestScheduler_RouterRandom(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p1"}}},
+	}}
+	p2 := &mockProv{name: "p2", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m2"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p2"}}},
+	}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1, p2}, WithRouter(&core.RandomRouter{}))
+
+	// Just verify it doesn't error and picks one of them
+	resp, err := s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content := resp.Choices[0].Message.Content
+	if content != "p1" && content != "p2" {
+		t.Fatalf("unexpected response: %s", content)
+	}
+}
+
+func TestScheduler_SetRouter(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p1"}}},
+	}}
+	p2 := &mockProv{name: "p2", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m2"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p2"}}},
+	}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1, p2})
+
+	// Default should be PrimaryRouter (p1)
+	resp, err := s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "p1" {
+		t.Fatalf("expected p1 from PrimaryRouter, got %s", resp.Choices[0].Message.Content)
+	}
+
+	// Switch to RoundRobin
+	s.SetRouter(&core.RoundRobinRouter{})
+	resp, err = s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "p1" {
+		t.Fatalf("expected p1 from RoundRobin first (starts at 0), got %s", resp.Choices[0].Message.Content)
+	}
+	// Second call should rotate to p2
+	resp, err = s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "p2" {
+		t.Fatalf("expected p2 from RoundRobin second, got %s", resp.Choices[0].Message.Content)
+	}
+
+	// Set nil router (should fall back to PrimaryRouter)
+	s.SetRouter(nil)
+	resp, err = s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "p1" {
+		t.Fatalf("expected p1 from fallback PrimaryRouter, got %s", resp.Choices[0].Message.Content)
+	}
+}
+
+func TestScheduler_RouterUnavailable(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: false, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+	p2 := &mockProv{name: "p2", available: false, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m2"}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1, p2}, WithRouter(&core.RoundRobinRouter{}))
+
+	_, err := s.ChatComplete(context.Background(), core.ChatCompletionRequest{Messages: []core.Message{{Role: "user", Content: "hi"}}})
+	if err == nil {
+		t.Fatal("expected error when all providers unavailable")
+	}
+}
+
+func TestScheduler_HealthCheck(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p1"}}},
+	}}
+	p2 := &mockProv{name: "p2", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m2"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p2"}}},
+	}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1, p2}, WithHealthCheckInterval(50*time.Millisecond))
+	defer s.Close()
+
+	// Start health check explicitly
+	s.StartHealthCheck(50 * time.Millisecond)
+
+	// Wait for at least one health check cycle
+	time.Sleep(120 * time.Millisecond)
+
+	// Both providers should still be available (health check passes for mock)
+	if !p1.available {
+		t.Fatal("p1 should still be available")
+	}
+	if !p2.available {
+		t.Fatal("p2 should still be available")
+	}
+}
+
+func TestScheduler_HealthCheckDisablesProvider(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1", MaxFailures: 1, CooldownDuration: time.Hour}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p1"}}},
+	}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithHealthCheckInterval(50*time.Millisecond))
+	defer s.Close()
+
+	// Make p1 fail health checks
+	p1.available = false
+	s.StartHealthCheck(50 * time.Millisecond)
+
+	// Wait for health check to run and fail
+	time.Sleep(120 * time.Millisecond)
+
+	// Provider should now be unavailable due to circuit breaker
+	if p1.IsAvailable() {
+		t.Fatal("p1 should be unavailable after failed health check")
+	}
+}
+
+func TestScheduler_HealthCheckIntervalZero(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithHealthCheckInterval(0))
+	defer s.Close()
+
+	if s.HealthCheckInterval() != 0 {
+		t.Fatalf("expected 0 interval, got %v", s.HealthCheckInterval())
+	}
+}
+
+func TestScheduler_SetHealthCheckInterval(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1})
+	defer s.Close()
+
+	// Default should be 0 (no auto-start)
+	if s.HealthCheckInterval() != 0 {
+		t.Fatalf("expected 0 default interval, got %v", s.HealthCheckInterval())
+	}
+
+	// Start with 50ms
+	s.SetHealthCheckInterval(50 * time.Millisecond)
+	if s.HealthCheckInterval() != 50*time.Millisecond {
+		t.Fatalf("expected 50ms, got %v", s.HealthCheckInterval())
+	}
+
+	// Stop with 0
+	s.SetHealthCheckInterval(0)
+	if s.HealthCheckInterval() != 0 {
+		t.Fatalf("expected 0 after disable, got %v", s.HealthCheckInterval())
 	}
 }

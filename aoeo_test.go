@@ -57,6 +57,13 @@ func (m *mockProvider) ChatCompleteStream(_ context.Context, _ ChatCompletionReq
 	return nil, fmt.Errorf("mock provider does not support streaming")
 }
 
+func (m *mockProvider) HealthCheck(_ context.Context) error {
+	if m.available {
+		return nil
+	}
+	return fmt.Errorf("mock provider %s unhealthy", m.name)
+}
+
 func TestNewScheduler(t *testing.T) {
 	p1 := &mockProvider{name: "p1", available: true, config: ProviderConfig{MaxConcurrent: 3}}
 	p2 := &mockProvider{name: "p2", available: true, config: ProviderConfig{MaxConcurrent: 2}}

@@ -24,9 +24,12 @@ type CallRecord struct {
 }
 
 // History tracks recent AI provider calls with thread-safe access.
+// It uses a fixed-size ring buffer internally to avoid repeated allocations.
 type History struct {
 	mu      sync.RWMutex
-	records []CallRecord
+	buf     []CallRecord // fixed-size ring buffer
+	head    int          // index of the next write position (newest element is at head-1)
+	count   int          // number of valid elements in buf
 	maxSize int
 }
 
@@ -35,20 +38,30 @@ func NewHistory(maxSize int) *History {
 	if maxSize <= 0 {
 		maxSize = 100
 	}
-	return &History{maxSize: maxSize}
+	return &History{
+		buf:     make([]CallRecord, maxSize),
+		maxSize: maxSize,
+	}
 }
 
-// Record appends a call record. If capacity is exceeded, oldest records are dropped.
+// Record appends a call record. If capacity is exceeded, the oldest record is overwritten.
 func (h *History) Record(r CallRecord) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	h.records = append(h.records, r)
-	if len(h.records) > h.maxSize {
-		newRecords := make([]CallRecord, h.maxSize)
-		copy(newRecords, h.records[len(h.records)-h.maxSize:])
-		h.records = newRecords
+	h.buf[h.head] = r
+	h.head = (h.head + 1) % h.maxSize
+	if h.count < h.maxSize {
+		h.count++
 	}
+}
+
+// at returns the element at logical index i, where 0 is the newest.
+// Must be called with read lock held.
+func (h *History) at(i int) CallRecord {
+	// newest is at (h.head - 1), then (h.head - 2), etc.
+	idx := (h.head - 1 - i + h.maxSize) % h.maxSize
+	return h.buf[idx]
 }
 
 // Records returns a copy of all stored records (newest first).
@@ -56,46 +69,43 @@ func (h *History) Records() []CallRecord {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	result := make([]CallRecord, len(h.records))
-	for i := range h.records {
-		result[i] = h.records[len(h.records)-1-i]
+	result := make([]CallRecord, h.count)
+	for i := 0; i < h.count; i++ {
+		result[i] = h.at(i)
 	}
 	return result
 }
 
-// RecordsByTag returns records filtered by tag.
+// RecordsByTag returns records filtered by tag (newest first).
 func (h *History) RecordsByTag(tag string) []CallRecord {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	var result []CallRecord
-	for i := len(h.records) - 1; i >= 0; i-- {
-		for _, t := range h.records[i].Tags {
+	// Pre-allocate with a reasonable capacity to reduce reallocations.
+	result := make([]CallRecord, 0, h.count/4+1)
+	for i := 0; i < h.count; i++ {
+		r := h.at(i)
+		for _, t := range r.Tags {
 			if t == tag {
-				result = append(result, h.records[i])
+				result = append(result, r)
 				break
 			}
 		}
 	}
-	if result == nil {
-		return []CallRecord{}
-	}
 	return result
 }
 
-// RecordsByProvider returns records for a specific provider.
+// RecordsByProvider returns records for a specific provider (newest first).
 func (h *History) RecordsByProvider(name string) []CallRecord {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	var result []CallRecord
-	for i := len(h.records) - 1; i >= 0; i-- {
-		if h.records[i].Provider == name {
-			result = append(result, h.records[i])
+	result := make([]CallRecord, 0, h.count/4+1)
+	for i := 0; i < h.count; i++ {
+		r := h.at(i)
+		if r.Provider == name {
+			result = append(result, r)
 		}
-	}
-	if result == nil {
-		return []CallRecord{}
 	}
 	return result
 }
@@ -104,7 +114,12 @@ func (h *History) RecordsByProvider(name string) []CallRecord {
 func (h *History) Clear() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.records = h.records[:0]
+	h.head = 0
+	h.count = 0
+	// Zero out references to help GC.
+	for i := range h.buf {
+		h.buf[i] = CallRecord{}
+	}
 }
 
 // Stats returns aggregate statistics per provider.
@@ -113,7 +128,8 @@ func (h *History) Stats() map[string]ProviderStats {
 	defer h.mu.RUnlock()
 
 	stats := make(map[string]ProviderStats)
-	for _, r := range h.records {
+	for i := 0; i < h.count; i++ {
+		r := h.at(i)
 		s := stats[r.Provider]
 		s.Provider = r.Provider
 		s.TotalCalls++

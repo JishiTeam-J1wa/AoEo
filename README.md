@@ -13,11 +13,13 @@ AoEo 让你在代码中用统一的接口调用多个大模型 API（DeepSeek、
 | 场景 | 你能做的 |
 |---|---|
 | **多模型统一调用** | 一条 `ChatComplete` 请求，自动路由到可用 Provider |
+| **可插拔路由策略** | 内置 Primary / Round-Robin / Random 路由，支持自定义策略 |
 | **故障自动转移** | 主 API 失败时，自动切到备用 API，业务无感知 |
 | **双模型交叉验证** | 同一请求并发发给两个模型，对比结果一致性 |
-| **流式响应** | SSE 逐字返回，适用于聊天界面和实时场景 |
+| **流式响应** | SSE 逐字返回，支持流式拦截器实时处理 chunk |
 | **Prompt 统一管理** | 按 Provider/模型通配注入系统提示，无需改动业务代码 |
 | **成本透明化** | 每次调用自动计算 Token 成本，按 Provider 聚合统计 |
+| **后台健康检查** | 定期探测 Provider 可用性，自动触发熔断/恢复 |
 | **生产级稳定性** | 熔断器 + 自适应限流 + Panic 恢复 + 优雅关闭 |
 
 ---
@@ -260,7 +262,7 @@ cfg := aoeo.Config{
 
 ### 11. 拦截器机制
 
-`core.Interceptor` 提供 `BeforeRequest` / `AfterResponse` Hook，用于日志、监控、限流、请求篡改等横切关注点：
+`core.Interceptor` 提供 `BeforeRequest` / `AfterResponse` / `AfterStreamChunk` / `AfterStreamDone` Hook，用于日志、监控、限流、请求篡改、流式数据处理等横切关注点：
 
 ```go
 ic := aoeo.Interceptor{
@@ -273,16 +275,67 @@ ic := aoeo.Interceptor{
         // 例如：记录延迟、统一错误包装
         return resp, err
     },
+    AfterStreamChunk: func(ctx context.Context, req aoeo.ChatCompletionRequest, chunk *aoeo.StreamChunk) error {
+        // 例如：实时敏感词过滤
+        return nil
+    },
+    AfterStreamDone: func(ctx context.Context, req aoeo.ChatCompletionRequest, err error) error {
+        // 例如：记录流式会话总耗时
+        return nil
+    },
 }
 
 client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(ic))
 ```
 
-- 多个拦截器按顺序执行，`BeforeRequest` 遇到错误立即中断
-- `AfterResponse` 可转换响应或错误，对调用方透明
+- 多个拦截器按顺序执行，`BeforeRequest` / `AfterStreamChunk` 遇到错误立即中断
+- `AfterResponse` / `AfterStreamDone` 可转换响应或错误，对调用方透明
 - 实现必须线程安全
 
-### 12. 环境变量配置
+### 12. 路由策略
+
+支持可插拔的路由策略，替代默认的「第一个可用 Provider」逻辑：
+
+```go
+// 轮询（Round-Robin）
+client.SetRouter(&aoeo.RoundRobinRouter{})
+
+// 随机（Random）
+client.SetRouter(&aoeo.RandomRouter{})
+
+// 自定义路由
+client.SetRouter(&myCustomRouter{})
+```
+
+内置策略：
+
+| 策略 | 行为 | 适用场景 |
+|---|---|---|
+| `PrimaryRouter` | 选第一个可用 Provider | 默认行为，主备架构 |
+| `RoundRobinRouter` | 轮询可用 Provider | 均匀负载 |
+| `RandomRouter` | 随机选可用 Provider | 简单负载分散 |
+
+路由策略影响 `ChatComplete`、`ChatCompleteWithFallback` 的 Provider 选择顺序，以及 `ChatCompleteDual` 的配对策略。
+
+### 13. 后台健康检查
+
+Scheduler 可启动后台 goroutine，定期对所有 Provider 执行轻量级健康探测（默认关闭）：
+
+```go
+// 每 30 秒检查一次
+s := aoeo.NewSchedulerWithOptions(providers, aoeo.WithHealthCheckInterval(30*time.Second))
+
+// 或运行时动态调整
+client.SetHealthCheckInterval(30 * time.Second)
+client.SetHealthCheckInterval(0) // 关闭健康检查
+```
+
+- 健康检查通过 HTTP GET 探测 Provider Endpoint（5 秒超时）
+- 检查失败会触发熔断器的 `RecordFailure`，加速 Provider 进入冷却
+- 检查成功会触发 `RecordSuccess`，帮助 Provider 从冷却中恢复
+- 关闭 Scheduler 时会自动停止后台健康检查 goroutine
+
+### 14. 环境变量配置
 
 无需硬编码，直接从 `AOEO_PROVIDER_N_*` 环境变量加载配置：
 
@@ -306,7 +359,7 @@ client, err := aoeo.NewClient(cfg)
 
 还支持自定义前缀：`LoadConfigFromEnvWithPrefix("MYAPP")` 读取 `MYAPP_PROVIDER_0_NAME` 等变量。
 
-### 13. 自定义 HTTPClient
+### 15. 自定义 HTTPClient
 
 为单个 Provider 注入自定义 `*http.Client`，用于链路追踪、Mock 测试或特殊 TLS 配置：
 
@@ -368,6 +421,8 @@ AoEo/
 │   ├── config.go      # 配置验证
 │   ├── pricing.go     # 价格模型 + 成本计算
 │   ├── retry.go       # 重试配置
+│   ├── interceptor.go # 拦截器链（含流式拦截）
+│   ├── router.go      # 可插拔路由策略接口
 │   ├── event.go       # 事件系统
 │   └── logger.go      # 结构化日志
 ├── providers/         # Provider 接口和实现
