@@ -302,6 +302,11 @@ type circuitBreaker interface {
 	RecordSuccess()
 }
 
+// healthReporter is the subset of BaseProvider methods for reading runtime health.
+type healthReporter interface {
+	Health() core.ProviderHealth
+}
+
 func (s *Scheduler) runHealthChecks() {
 	s.mu.RLock()
 	provs := make([]providers.Provider, len(s.providers))
@@ -648,6 +653,18 @@ func copyProviders(src []providers.Provider) []providers.Provider {
 	return dst
 }
 
+// ProviderByName returns the provider with the given name, or nil if not found.
+func (s *Scheduler) ProviderByName(name string) providers.Provider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.providers {
+		if p.Name() == name {
+			return p
+		}
+	}
+	return nil
+}
+
 // AvailableProviders returns the currently available providers.
 // It uses a short-lived cache to avoid repeated scans under high load.
 // The returned slice is a copy; modifying it does not affect internal state.
@@ -742,11 +759,15 @@ func (s *Scheduler) ProviderStatus() []core.ProviderStatus {
 		} else {
 			model = p.Config().Model
 		}
-		status = append(status, core.ProviderStatus{
+		st := core.ProviderStatus{
 			Name:      p.Name(),
 			Available: p.IsAvailable(),
 			Model:     model,
-		})
+		}
+		if hr, ok := p.(healthReporter); ok {
+			st.Health = hr.Health()
+		}
+		status = append(status, st)
 	}
 	return status
 }

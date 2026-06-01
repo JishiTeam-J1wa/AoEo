@@ -505,3 +505,203 @@ type mockRoundTripper struct {
 func (m *mockRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	return m.fn(r)
 }
+
+
+// ========== Health tracking tests ==========
+
+func TestBaseProvider_RecordHealthCheck(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	// Record a successful health check.
+	bp.RecordHealthCheck(100, true)
+	h := bp.Health()
+	if h.LastLatencyMs != 100 {
+		t.Errorf("expected last latency 100, got %d", h.LastLatencyMs)
+	}
+	if h.SuccessRate != 1.0 {
+		t.Errorf("expected success rate 1.0, got %f", h.SuccessRate)
+	}
+	if h.ConsecutiveFails != 0 {
+		t.Errorf("expected consecutive fails 0, got %d", h.ConsecutiveFails)
+	}
+
+	// Record a failed health check.
+	bp.RecordHealthCheck(200, false)
+	h = bp.Health()
+	if h.LastLatencyMs != 200 {
+		t.Errorf("expected last latency 200, got %d", h.LastLatencyMs)
+	}
+	if h.SuccessRate != 0.5 {
+		t.Errorf("expected success rate 0.5, got %f", h.SuccessRate)
+	}
+	if h.ConsecutiveFails != 1 {
+		t.Errorf("expected consecutive fails 1, got %d", h.ConsecutiveFails)
+	}
+}
+
+func TestBaseProvider_RecordCallResult(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	bp.RecordCallResult(50, nil)
+	bp.RecordCallResult(150, errors.New("fail"))
+
+	h := bp.Health()
+	if h.AvgLatencyMs != 100 {
+		t.Errorf("expected avg latency 100, got %d", h.AvgLatencyMs)
+	}
+	if h.SuccessRate != 0.5 {
+		t.Errorf("expected success rate 0.5, got %f", h.SuccessRate)
+	}
+	if h.ConsecutiveFails != 1 {
+		t.Errorf("expected consecutive fails 1, got %d", h.ConsecutiveFails)
+	}
+}
+
+func TestBaseProvider_HealthSlidingWindow(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	// Fill the window with 20 entries: 10 success (latency 100) + 10 failure (latency 200).
+	for i := 0; i < 10; i++ {
+		bp.RecordHealthCheck(100, true)
+	}
+	for i := 0; i < 10; i++ {
+		bp.RecordHealthCheck(200, false)
+	}
+
+	h := bp.Health()
+	if h.TotalChecks != 20 {
+		t.Errorf("expected total checks 20, got %d", h.TotalChecks)
+	}
+	if h.SuccessRate != 0.5 {
+		t.Errorf("expected success rate 0.5, got %f", h.SuccessRate)
+	}
+	if h.AvgLatencyMs != 150 {
+		t.Errorf("expected avg latency 150, got %d", h.AvgLatencyMs)
+	}
+	if h.ConsecutiveFails != 10 {
+		t.Errorf("expected consecutive fails 10, got %d", h.ConsecutiveFails)
+	}
+
+	// Push one more entry (success) — oldest should be evicted.
+	bp.RecordHealthCheck(100, true)
+	h = bp.Health()
+	if h.TotalChecks != 20 {
+		t.Errorf("expected total checks still 20 after overflow, got %d", h.TotalChecks)
+	}
+	// Window had 10 success + 10 failure. The oldest success is evicted.
+	// Result: 9 success + 10 failure + 1 new success = 10 success out of 20.
+	expectedRate := 10.0 / 20.0
+	if h.SuccessRate != expectedRate {
+		t.Errorf("expected success rate %f after overflow, got %f", expectedRate, h.SuccessRate)
+	}
+}
+
+func TestBaseProvider_HealthConsecutiveFails(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	// Pattern: fail, fail, success, fail, success, success
+	bp.RecordHealthCheck(10, false)
+	bp.RecordHealthCheck(10, false)
+	bp.RecordHealthCheck(10, true)
+	bp.RecordHealthCheck(10, false)
+	bp.RecordHealthCheck(10, true)
+	bp.RecordHealthCheck(10, true)
+
+	h := bp.Health()
+	// Max consecutive fails in window: 2 (the first two entries).
+	if h.ConsecutiveFails != 2 {
+		t.Errorf("expected consecutive fails 2, got %d", h.ConsecutiveFails)
+	}
+	// 3 success out of 6.
+	if h.SuccessRate != 3.0/6.0 {
+		t.Errorf("expected success rate %f, got %f", 3.0/6.0, h.SuccessRate)
+	}
+}
+
+func TestBaseProvider_HealthConcurrent(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(success bool) {
+			defer wg.Done()
+			bp.RecordHealthCheck(10, success)
+		}(i%2 == 0)
+	}
+	wg.Wait()
+
+	h := bp.Health()
+	if h.TotalChecks != 20 {
+		t.Errorf("expected total checks 20 (window size), got %d", h.TotalChecks)
+	}
+	// Success rate should be close to 0.5 but may vary due to race.
+	if h.SuccessRate < 0.3 || h.SuccessRate > 0.7 {
+		t.Errorf("success rate %f out of reasonable range for concurrent writes", h.SuccessRate)
+	}
+}
+
+
+// ========== Function Calling mapping tests ==========
+
+func TestBuildOpenAIMessages_WithToolCalls(t *testing.T) {
+	coreMsgs := []core.Message{
+		{Role: "user", Content: "What's the weather?"},
+		{Role: "assistant", ToolCalls: []core.ToolCall{
+			{ID: "call_1", Type: "function", Function: core.FunctionCall{Name: "get_weather", Arguments: `{"city":"Beijing"}`}},
+		}},
+		{Role: "tool", ToolCallID: "call_1", Content: "Sunny, 25C"},
+	}
+
+	openaiMsgs := buildOpenAIMessages(coreMsgs)
+	if len(openaiMsgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(openaiMsgs))
+	}
+	if len(openaiMsgs[1].ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call in assistant message, got %d", len(openaiMsgs[1].ToolCalls))
+	}
+	if openaiMsgs[1].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("expected tool call ID call_1, got %s", openaiMsgs[1].ToolCalls[0].ID)
+	}
+	if openaiMsgs[2].ToolCallID != "call_1" {
+		t.Fatalf("expected tool call ID call_1 in tool message, got %s", openaiMsgs[2].ToolCallID)
+	}
+}
+
+func TestBuildOpenAITools(t *testing.T) {
+	tools := []core.Tool{
+		{Type: "function", Function: &core.FunctionDefinition{
+			Name:        "get_weather",
+			Description: "Get weather for a city",
+			Parameters:  map[string]any{"type": "object"},
+			Strict:      true,
+		}},
+	}
+	openaiTools := buildOpenAITools(tools)
+	if len(openaiTools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(openaiTools))
+	}
+	if openaiTools[0].Function.Name != "get_weather" {
+		t.Fatalf("expected function name get_weather, got %s", openaiTools[0].Function.Name)
+	}
+	if !openaiTools[0].Function.Strict {
+		t.Fatal("expected Strict=true")
+	}
+}
+
+func TestBuildOpenAIToolChoice(t *testing.T) {
+	// String choice
+	if v := buildOpenAIToolChoice("auto"); v != "auto" {
+		t.Fatalf("expected auto, got %v", v)
+	}
+	// ToolChoice struct
+	choice := core.ToolChoice{Type: "function"}
+	choice.Function.Name = "get_weather"
+	v := buildOpenAIToolChoice(choice)
+	_ = v // just verify no panic
+
+	// Nil
+	if v := buildOpenAIToolChoice(nil); v != nil {
+		t.Fatalf("expected nil, got %v", v)
+	}
+}

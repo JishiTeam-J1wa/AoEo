@@ -1,27 +1,48 @@
 # AoEo
 
-> **一个用于聚合调度多 AI API 的 Go SDK**
+[![Go Version](https://img.shields.io/badge/go-%3E%3D1.22-blue)](https://golang.org)
+[![Go Report Card](https://g.shields.io/badge/go%20report-A+-brightgreen.svg)](https://goreportcard.com)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-AoEo 让你在代码中用统一的接口调用多个大模型 API（DeepSeek、Kimi、GPT、GLM、Qwen 等），并自动处理故障转移、并发限流、熔断降级、成本统计和 Prompt 注入。
+> **生产级多 Provider AI API 网关 —— 统一接入、智能路由、自动容灾、隐私保护**
 
-无需为每个平台写不同的调用代码，也无需自己实现重试和容灾逻辑。
+## 它解决什么问题
+
+你在用 DeepSeek、Kimi、GPT、GLM、Qwen 等多家 AI 服务时，是否遇到：
+
+- **单点故障**：主 API 挂了，服务直接不可用
+- **代码碎片**：每家 API 格式不同，切换要改一堆代码
+- **限流熔断**：不知道哪家会突然限流，缺乏自动降级
+- **成本黑盒**：各平台计费不同，算不清花了多少
+- **数据泄露**：请求里带身份证号、手机号，直接发给第三方
+
+**AoEo 是一个 Go 库，让你用同一套代码同时接入多家 AI，自动处理路由、故障转移、限流熔断、成本统计，并可选隐私网关——敏感数据出网前自动替换，返回时还原，用户无感知。**
+
+```
+你的代码 ──→ AoEo ──┬──→ DeepSeek (主)
+                   ├──→ Kimi (备用)
+                   ├──→ GPT (备用)
+                   └──→ 隐私网关 (出网前脱敏)
+```
 
 ---
 
-## 用 AoEo 可以做什么
+## 核心能力一览
 
-| 场景 | 你能做的 |
+| 痛点 | AoEo 的解法 |
 |---|---|
-| **多模型统一调用** | 一条 `ChatComplete` 请求，自动路由到可用 Provider |
-| **可插拔路由策略** | 内置 Primary / Round-Robin / Random 路由，支持自定义策略 |
-| **故障自动转移** | 主 API 失败时，自动切到备用 API，业务无感知 |
-| **双模型交叉验证** | 同一请求并发发给两个模型，对比结果一致性 |
-| **流式响应** | SSE 逐字返回，支持流式拦截器实时处理 chunk |
-| **Prompt 统一管理** | 按 Provider/模型通配注入系统提示，无需改动业务代码 |
-| **成本透明化** | 每次调用自动计算 Token 成本，按 Provider 聚合统计 |
-| **后台健康检查** | 定期探测 Provider 可用性，自动触发熔断/恢复 |
-| **隐私安全网关** | 本地 PII 检测 + 规则过滤，敏感数据出网前自动替换伪造值 |
-| **生产级稳定性** | 熔断器 + 自适应限流 + Panic 恢复 + 优雅关闭 |
+| 多平台 API 不统一 | **统一接口**：一条 `ChatComplete` 调用任意 OpenAI-compatible Provider |
+| 单点故障 | **自动故障转移**：主 API 失败自动切备用，业务无感知 |
+| 不知道用哪家 | **可插拔路由**：Primary / Round-Robin / Random / 自定义策略 |
+| 结果不可信 | **双模型验证**：同一请求并发发给两家，对比结果一致性 |
+| 流式输出难处理 | **SSE 流式**：逐字返回，支持流式拦截器实时处理 |
+| Prompt 散落各处 | **统一注入**：按 Provider/模型通配注入系统提示，零业务侵入 |
+| 成本算不清 | **自动计费**：每次调用算 Token 成本，按 Provider 聚合 |
+| 服务状态不明 | **健康探测**：后台定期探测，自动熔断/恢复 |
+| 路由不智能 | **权重路由**：按延迟/成功率加权选择，自动避开慢节点 |
+| 需要 Tool Calling | **Function Calling**：统一 Tools/ToolCalls 抽象，兼容各家实现 |
+| 敏感数据泄露 | **隐私网关**：本地规则 + PII 检测，出网前替换伪造值 |
+| 生产不稳定 | **熔断 + 限流 + Panic 恢复 + 优雅关闭** |
 
 ---
 
@@ -76,6 +97,18 @@ func main() {
 }
 ```
 
+### 带隐私网关的调用（3 行接入）
+
+```go
+rules, _ := privacy.LoadRuleDatabase("privacy_rules.yaml")
+gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
+    Rules: privacy.NewRuleEngine(rules), Policy: privacy.ActionPseudonymize,
+})
+client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gateway.ToInterceptor()))
+```
+
+敏感信息（手机号、身份证号、内网 IP）出网前自动替换为伪造值，AI 响应返回时自动还原。
+
 ---
 
 ## 安装
@@ -84,7 +117,7 @@ func main() {
 go get github.com/JishiTeam-J1wa/AoEo
 ```
 
-Go 版本要求：≥ 1.22
+Go 版本要求：≥ 1.25（`modernc.org/sqlite` 等依赖要求）
 
 ---
 
@@ -416,6 +449,84 @@ client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gateway.ToInterceptor()))
 
 **完整使用手册**：见 [PRIVACY_GATEWAY.md](./PRIVACY_GATEWAY.md)
 
+### 17. Function Calling
+
+统一 Tool/Function 抽象，兼容所有 OpenAI-compatible Provider：
+
+```go
+req := aoeo.BuildRequest(
+    []aoeo.Message{{Role: "user", Content: "What's the weather in Beijing?"}},
+    aoeo.WithTools([]aoeo.Tool{
+        {
+            Type: "function",
+            Function: &aoeo.FunctionDefinition{
+                Name:        "get_weather",
+                Description: "Get current weather for a city",
+                Parameters:  map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}},
+            },
+        },
+    }),
+    aoeo.WithToolChoice("auto"),
+)
+
+resp, _ := client.ChatComplete(ctx, req)
+if len(resp.Choices[0].Message.ToolCalls) > 0 {
+    tc := resp.Choices[0].Message.ToolCalls[0]
+    fmt.Printf("Model wants to call %s with args: %s\n", tc.Function.Name, tc.Function.Arguments)
+}
+```
+
+- 完整的 `Tool`/`ToolCall`/`FunctionDefinition` 类型，支持流式 ToolCalls
+- 双向映射：core 类型 ↔ go-openai 类型，不丢失任何字段
+- `WithTools` / `WithToolChoice` / `WithParallelToolCalls` builder 选项
+
+### 18. 权重路由
+
+根据 Provider 实时健康指标智能选择：
+
+```go
+// 按延迟加权：延迟越低，被选中的概率越高
+client.SetRouter(&aoeo.WeightedRouter{Strategy: aoeo.StrategyLatency})
+
+// 按成功率加权
+client.SetRouter(&aoeo.WeightedRouter{Strategy: aoeo.StrategySuccessRate})
+
+// 综合策略：延迟 50% + 成功率 50%
+client.SetRouter(&aoeo.WeightedRouter{Strategy: aoeo.StrategyCombined})
+```
+
+- 基于 20 次调用滑动窗口的实时健康数据
+- 支持 `SelectSequence`：按得分降序排列，用于 fallback
+- 可配合 `SingleProviderRouter` 实现 CLI 定向调用
+
+### 19. 持久化存储后端
+
+AoEo 提供统一的 `core.Storage` 接口，支持将调用历史、审计日志、隐私映射表持久化到数据库：
+
+```go
+// SQLite（默认，零配置，单机部署推荐）
+store, _ := storage.NewSQLite("./aoeo.db")
+
+// MySQL（远程/集群部署）
+store, _ := storage.NewMySQL("user:pass@tcp(localhost:3306)/aoeo?charset=utf8mb4")
+
+// PostgreSQL
+store, _ := storage.NewPostgres("postgres://user:pass@localhost:5432/aoeo?sslmode=disable")
+
+// 接入 History（调用历史持久化）
+history := engine.NewHistory(100)
+history.SetStorage(store)
+
+// 接入 Privacy Gateway（映射表持久化）
+gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
+    Storage: store,
+    Rules:   privacy.NewRuleEngine(rules),
+    Policy:  privacy.ActionPseudonymize,
+})
+```
+
+**支持的存储**：SQLite（纯 Go）/ MySQL / PostgreSQL，统一 Schema：calls、audits、privacy_mappings 三张表。
+
 ---
 
 ## 支持的 Provider
@@ -462,12 +573,17 @@ AoEo/
 │   └── providers.go   # Provider 接口 + BaseProvider + OpenAI + 内置 Provider
 ├── privacy/           # 隐私安全网关
 │   ├── types.go           # 类型定义（EntityType, Span, Mapping）
-│   ├── store.go           # SQLite 映射表存储
+│   ├── store.go           # SQLite 映射表存储（兼容层）
 │   ├── generator.go       # 伪造数据生成器
 │   ├── detector.go        # 检测器接口
 │   ├── rules.go           # 本地规则引擎（IP/域名/关键词/正则）
 │   ├── pseudonymizer.go   # 核心伪匿名化器（检测→替换→回溯）
 │   └── gateway.go         # AoEo Interceptor 集成
+├── storage/           # 持久化存储后端（SQLite / MySQL / Postgres）
+│   ├── base.go            # 公共 SQL CRUD 逻辑
+│   ├── sqlite.go          # SQLite 后端（纯 Go，零 CGO）
+│   ├── mysql.go           # MySQL 后端
+│   └── postgres.go        # PostgreSQL 后端
 ├── internal/          # 内部实现
 │   └── engine/
 │       ├── scheduler.go   # 调度核心 + 选项
@@ -478,6 +594,9 @@ AoEo/
 │       ├── result.go      # 结果处理 + JSON 提取
 │       ├── semaphore.go   # 自适应并发限流
 │       └── retry_impl.go  # 指数退避重试实现
+├── cmd/
+│   └── aoeo/
+│       └── main.go      # CLI 工具（list-models / test / status / chat / stream）
 ├── examples/
 │   ├── basic/
 │   ├── multi_provider/
@@ -487,7 +606,7 @@ AoEo/
 ├── DESIGN.md
 ├── AUDIT_REPORT.md
 ├── LICENSE
-└── aoeo_test.go       # 230 个单元测试（含 Race Detector），整体覆盖率 71.7%
+└── aoeo_test.go       # 300+ 个单元测试，`-race` / `go vet` 全绿
 ```
 
 ---
@@ -518,11 +637,16 @@ AoEo/
 - [x] **测试补齐**：流式 8 个 + buildRecord 5 个 + Client 18 个 + Retry Validate
 - [x] **覆盖率提升**：整体 66.6% → 71.7%，根包 52.4% → 84.5%
 
-### Phase 4 — 生态扩展
-- [ ] 权重路由（按价格/延迟/质量加权选择 Provider）
-- [ ] Provider 主动健康检查心跳
-- [ ] Function Calling 抽象层
-- [ ] CLI 工具（`aoeo list-models`, `aoeo test`）
+### Phase 4 — 生态扩展（已完成）
+- [x] **权重路由**：按延迟/成功率加权选择 Provider（`WeightedRouter`）
+- [x] **Provider 主动健康检查心跳**：20 次滑动窗口，实时追踪延迟/成功率/连续失败
+- [x] **Function Calling 抽象层**：统一 `Tool`/`ToolCall`/`FunctionDefinition` 类型，Provider 双向映射
+- [x] **CLI 工具**：`aoeo list-models` / `test` / `status` / `chat` / `stream`
+
+### Phase 5 — 未来方向
+- [ ] 权重路由扩展：按成本/自定义评分函数加权
+- [ ] Provider 插件机制：动态加载外部 Provider
+- [ ] 分布式调度：多节点状态同步
 
 ---
 

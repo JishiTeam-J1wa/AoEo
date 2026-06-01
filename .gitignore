@@ -26,3 +26,7 @@ Thumbs.db
 # Env files
 .env
 .env.local
+
+# CLI build artifact
+/aoeo
+

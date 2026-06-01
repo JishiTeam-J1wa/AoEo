@@ -111,3 +111,68 @@ func TestStreamCompletionResponse_ZeroUsage(t *testing.T) {
 		t.Fatal("zero value StreamCompletionResponse should have zero usage")
 	}
 }
+
+
+// ========== Function Calling type tests ==========
+
+func TestMessage_ToolCalls(t *testing.T) {
+	m := Message{
+		Role: "assistant",
+		ToolCalls: []ToolCall{
+			{ID: "call_1", Type: "function", Function: FunctionCall{Name: "get_weather", Arguments: `{"city":"Beijing"}`}},
+		},
+	}
+	if len(m.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(m.ToolCalls))
+	}
+	if m.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("expected function name get_weather, got %s", m.ToolCalls[0].Function.Name)
+	}
+}
+
+func TestChatCompletionRequest_Validate_ToolMessage(t *testing.T) {
+	// Tool result messages can have empty content.
+	req := ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []Message{
+			{Role: "user", Content: "What's the weather?"},
+			{Role: "assistant", Content: "", ToolCalls: []ToolCall{
+				{ID: "call_1", Type: "function", Function: FunctionCall{Name: "get_weather", Arguments: `{}`}},
+			}},
+			{Role: "tool", Content: "Sunny, 25C", ToolCallID: "call_1"},
+		},
+		Tools: []Tool{
+			{Type: "function", Function: &FunctionDefinition{Name: "get_weather"}},
+		},
+	}
+	issues := req.Validate()
+	if len(issues) > 0 {
+		t.Fatalf("expected no validation issues for tool messages, got: %v", issues)
+	}
+}
+
+func TestChatCompletionRequest_Clone_WithTools(t *testing.T) {
+	req := ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []Message{
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{ID: "call_1", Function: FunctionCall{Name: "f1"}},
+			}},
+		},
+		Tools: []Tool{
+			{Type: "function", Function: &FunctionDefinition{Name: "f1"}},
+		},
+	}
+	cloned := req.Clone()
+
+	// Mutate original tool calls
+	req.Messages[0].ToolCalls[0].ID = "modified"
+	req.Tools[0].Type = "modified"
+
+	if cloned.Messages[0].ToolCalls[0].ID == "modified" {
+		t.Fatal("Clone did not deep-copy ToolCalls")
+	}
+	if cloned.Tools[0].Type == "modified" {
+		t.Fatal("Clone did not deep-copy Tools")
+	}
+}

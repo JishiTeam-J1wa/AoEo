@@ -28,6 +28,13 @@ type Provider interface {
 	HealthCheck(ctx context.Context) error
 }
 
+// healthEntry is a single observation in the sliding window.
+type healthEntry struct {
+	latencyMs int64
+	success   bool
+	timestamp time.Time
+}
+
 // BaseProvider provides common logic for all providers (circuit breaker, system prompt override).
 // It is exported for use by custom provider implementations, but most users should use
 // the built-in providers or the generic OpenAIProvider.
@@ -43,6 +50,13 @@ type BaseProvider struct {
 
 	// Optional event emitter for provider lifecycle events.
 	emitter atomic.Value // stores *emitterBox
+
+	// Runtime health metrics (sliding window of recent calls).
+	healthMu     sync.RWMutex
+	healthWindow [20]healthEntry
+	healthHead   int
+	healthCount  int
+	healthLatest atomic.Pointer[core.ProviderHealth]
 }
 
 // emitterBox wraps an EventEmitter so atomic.Value stores a consistently-typed pointer.
@@ -54,7 +68,75 @@ type emitterBox struct {
 func NewBaseProvider(config core.ProviderConfig) *BaseProvider {
 	bp := &BaseProvider{config: config}
 	bp.emitter.Store(&emitterBox{em: core.NopEmitter{}})
+	bp.healthLatest.Store(&core.ProviderHealth{})
 	return bp
+}
+
+// RecordHealthCheck records the result of a health-check probe.
+func (b *BaseProvider) RecordHealthCheck(latencyMs int64, success bool) {
+	b.pushHealthEntry(healthEntry{latencyMs: latencyMs, success: success, timestamp: time.Now()})
+}
+
+// RecordCallResult records the result of an actual API call.
+func (b *BaseProvider) RecordCallResult(latencyMs int64, err error) {
+	b.pushHealthEntry(healthEntry{latencyMs: latencyMs, success: err == nil, timestamp: time.Now()})
+}
+
+// Health returns the current runtime health snapshot.
+func (b *BaseProvider) Health() core.ProviderHealth {
+	if h := b.healthLatest.Load(); h != nil {
+		return *h
+	}
+	return core.ProviderHealth{}
+}
+
+// pushHealthEntry adds an entry to the sliding window and recomputes the snapshot.
+func (b *BaseProvider) pushHealthEntry(entry healthEntry) {
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+
+	b.healthWindow[b.healthHead] = entry
+	b.healthHead = (b.healthHead + 1) % len(b.healthWindow)
+	if b.healthCount < len(b.healthWindow) {
+		b.healthCount++
+	}
+
+	// Recompute aggregated metrics from the window.
+	var totalLatency int64
+	var successCount int
+	var consecutiveFails int
+	var lastFailStreak int
+	for i := 0; i < b.healthCount; i++ {
+		idx := (b.healthHead - b.healthCount + i + len(b.healthWindow)) % len(b.healthWindow)
+		e := b.healthWindow[idx]
+		totalLatency += e.latencyMs
+		if e.success {
+			successCount++
+			lastFailStreak = 0
+		} else {
+			lastFailStreak++
+			if lastFailStreak > consecutiveFails {
+				consecutiveFails = lastFailStreak
+			}
+		}
+	}
+
+	snapshot := &core.ProviderHealth{
+		LastCheckAt:      entry.timestamp,
+		LastLatencyMs:    entry.latencyMs,
+		AvgLatencyMs:     totalLatency / int64(max(b.healthCount, 1)),
+		SuccessRate:      float64(successCount) / float64(max(b.healthCount, 1)),
+		ConsecutiveFails: consecutiveFails,
+		TotalChecks:      b.healthCount,
+	}
+	b.healthLatest.Store(snapshot)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // Config returns the provider's configuration.
@@ -135,8 +217,10 @@ func (b *BaseProvider) IsAvailable() bool {
 
 // HealthCheck performs a lightweight connectivity check to the provider endpoint.
 // It uses a 5-second timeout and does a simple HTTP GET to the base URL.
+// The latency and result are recorded in the provider's health window.
 func (b *BaseProvider) HealthCheck(ctx context.Context) error {
 	if b.config.APIKey == "" || b.config.Endpoint == "" {
+		b.RecordHealthCheck(0, false)
 		return fmt.Errorf("provider %s config incomplete", b.config.Name)
 	}
 
@@ -150,19 +234,25 @@ func (b *BaseProvider) HealthCheck(ctx context.Context) error {
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, b.config.Endpoint, nil)
 	if err != nil {
+		b.RecordHealthCheck(0, false)
 		return fmt.Errorf("health check request for %s: %w", b.config.Name, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+b.config.APIKey)
 
+	start := time.Now()
 	resp, err := client.Do(req)
+	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
+		b.RecordHealthCheck(latencyMs, false)
 		return fmt.Errorf("health check failed for %s: %w", b.config.Name, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 500 {
+		b.RecordHealthCheck(latencyMs, false)
 		return fmt.Errorf("health check for %s returned status %d", b.config.Name, resp.StatusCode)
 	}
+	b.RecordHealthCheck(latencyMs, true)
 	return nil
 }
 
@@ -319,15 +409,138 @@ func deriveTransport(base *http.Client) *http.Transport {
 
 func (p *OpenAIProvider) Name() string { return p.Config().Name }
 
-// ChatCompleteStream performs a streaming chat completion.
-func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
-	messages := make([]openai.ChatCompletionMessage, len(req.Messages))
-	for i, m := range req.Messages {
-		messages[i] = openai.ChatCompletionMessage{
-			Role:    m.Role,
-			Content: m.Content,
+// buildOpenAIMessages converts core.Message slice to go-openai messages,
+// preserving tool calls, tool call IDs, and function names.
+func buildOpenAIMessages(messages []core.Message) []openai.ChatCompletionMessage {
+	result := make([]openai.ChatCompletionMessage, len(messages))
+	for i, m := range messages {
+		result[i] = openai.ChatCompletionMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			Name:       m.Name,
+			ToolCallID: m.ToolCallID,
+		}
+		if len(m.ToolCalls) > 0 {
+			result[i].ToolCalls = make([]openai.ToolCall, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				result[i].ToolCalls[j] = openai.ToolCall{
+					ID:   tc.ID,
+					Type: openai.ToolType(tc.Type),
+					Function: openai.FunctionCall{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+				if tc.Index > 0 {
+					idx := tc.Index
+					result[i].ToolCalls[j].Index = &idx
+				}
+			}
 		}
 	}
+	return result
+}
+
+// buildOpenAITools converts core.Tool slice to go-openai tools.
+func buildOpenAITools(tools []core.Tool) []openai.Tool {
+	if len(tools) == 0 {
+		return nil
+	}
+	result := make([]openai.Tool, len(tools))
+	for i, t := range tools {
+		result[i] = openai.Tool{Type: openai.ToolType(t.Type)}
+		if t.Function != nil {
+			result[i].Function = &openai.FunctionDefinition{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+				Strict:      t.Function.Strict,
+			}
+		}
+	}
+	return result
+}
+
+// buildOpenAIToolChoice converts a core tool choice value to go-openai format.
+func buildOpenAIToolChoice(choice any) any {
+	if choice == nil {
+		return nil
+	}
+	if s, ok := choice.(string); ok {
+		return s
+	}
+	if tc, ok := choice.(core.ToolChoice); ok {
+		return openai.ToolChoice{
+			Type: openai.ToolType(tc.Type),
+			Function: openai.ToolFunction{
+				Name: tc.Function.Name,
+			},
+		}
+	}
+	return choice
+}
+
+// buildCoreChoice converts a go-openai choice to core.Choice, preserving tool calls.
+func buildCoreChoice(choice openai.ChatCompletionChoice) core.Choice {
+	msg := core.Message{
+		Role:    choice.Message.Role,
+		Content: choice.Message.Content,
+		Name:    choice.Message.Name,
+	}
+	if choice.Message.ToolCallID != "" {
+		msg.ToolCallID = choice.Message.ToolCallID
+	}
+	if len(choice.Message.ToolCalls) > 0 {
+		msg.ToolCalls = make([]core.ToolCall, len(choice.Message.ToolCalls))
+		for i, tc := range choice.Message.ToolCalls {
+			msg.ToolCalls[i] = core.ToolCall{
+				ID:   tc.ID,
+				Type: string(tc.Type),
+				Function: core.FunctionCall{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			}
+			if tc.Index != nil {
+				msg.ToolCalls[i].Index = *tc.Index
+			}
+		}
+	}
+	return core.Choice{
+		Index:        choice.Index,
+		Message:      msg,
+		FinishReason: string(choice.FinishReason),
+	}
+}
+
+// buildStreamDelta converts a go-openai stream delta to core.Message, preserving tool calls.
+func buildStreamDelta(delta openai.ChatCompletionStreamChoiceDelta) core.Message {
+	msg := core.Message{
+		Role:    delta.Role,
+		Content: delta.Content,
+	}
+	if len(delta.ToolCalls) > 0 {
+		msg.ToolCalls = make([]core.ToolCall, len(delta.ToolCalls))
+		for i, tc := range delta.ToolCalls {
+			msg.ToolCalls[i] = core.ToolCall{
+				ID:   tc.ID,
+				Type: string(tc.Type),
+				Function: core.FunctionCall{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			}
+			if tc.Index != nil {
+				msg.ToolCalls[i].Index = *tc.Index
+			}
+		}
+	}
+	return msg
+}
+
+// ChatCompleteStream performs a streaming chat completion.
+func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	messages := buildOpenAIMessages(req.Messages)
 
 	// Inject system prompt override if set.
 	if sys := p.GetSystemPrompt(); sys != "" {
@@ -345,17 +558,20 @@ func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCo
 	}
 
 	streamReq := openai.ChatCompletionRequest{
-		Model:            req.Model,
-		Messages:         messages,
-		Temperature:      req.Temperature,
-		MaxTokens:        req.MaxTokens,
-		TopP:             req.TopP,
-		PresencePenalty:  req.PresencePenalty,
-		FrequencyPenalty: req.FrequencyPenalty,
-		Stop:             req.Stop,
-		Seed:             req.Seed,
-		ResponseFormat:   respFormat,
-		Stream:           true,
+		Model:             req.Model,
+		Messages:          messages,
+		Temperature:       req.Temperature,
+		MaxTokens:         req.MaxTokens,
+		TopP:              req.TopP,
+		PresencePenalty:   req.PresencePenalty,
+		FrequencyPenalty:  req.FrequencyPenalty,
+		Stop:              req.Stop,
+		Seed:              req.Seed,
+		ResponseFormat:    respFormat,
+		Stream:            true,
+		Tools:             buildOpenAITools(req.Tools),
+		ToolChoice:        buildOpenAIToolChoice(req.ToolChoice),
+		ParallelToolCalls: req.ParallelToolCalls,
 	}
 	cfg := p.Config()
 	if streamReq.Model == "" {
@@ -420,10 +636,7 @@ func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCo
 					Model: response.Model,
 					Chunk: core.StreamChunk{
 						Index: choice.Index,
-						Delta: core.Message{
-							Role:    choice.Delta.Role,
-							Content: choice.Delta.Content,
-						},
+						Delta: buildStreamDelta(choice.Delta),
 						FinishReason: string(choice.FinishReason),
 					},
 					Usage: usage,
@@ -437,29 +650,28 @@ func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCo
 }
 
 func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (result *core.ChatCompletionResponse, err error) {
+	start := time.Now()
 	defer func() {
+		latencyMs := time.Since(start).Milliseconds()
 		if r := recover(); r != nil {
 			core.GetLogger().Error("provider panic recovered",
 				"provider", p.Name(),
 				"panic", r)
 			p.RecordFailure()
+			p.RecordCallResult(latencyMs, fmt.Errorf("panic: %v", r))
 			err = fmt.Errorf("provider panic: %v", r)
 			return
 		}
 		if err != nil {
 			p.RecordFailure()
+			p.RecordCallResult(latencyMs, err)
 		} else {
 			p.RecordSuccess()
+			p.RecordCallResult(latencyMs, nil)
 		}
 	}()
 
-	messages := make([]openai.ChatCompletionMessage, len(req.Messages))
-	for i, m := range req.Messages {
-		messages[i] = openai.ChatCompletionMessage{
-			Role:    m.Role,
-			Content: m.Content,
-		}
-	}
+	messages := buildOpenAIMessages(req.Messages)
 
 	// Inject system prompt override if set.
 	if sys := p.GetSystemPrompt(); sys != "" {
@@ -477,17 +689,20 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 	}
 
 	streamReq := openai.ChatCompletionRequest{
-		Model:            req.Model,
-		Messages:         messages,
-		Temperature:      req.Temperature,
-		MaxTokens:        req.MaxTokens,
-		TopP:             req.TopP,
-		PresencePenalty:  req.PresencePenalty,
-		FrequencyPenalty: req.FrequencyPenalty,
-		Stop:             req.Stop,
-		Seed:             req.Seed,
-		ResponseFormat:   respFormat,
-		Stream:           req.Stream,
+		Model:             req.Model,
+		Messages:          messages,
+		Temperature:       req.Temperature,
+		MaxTokens:         req.MaxTokens,
+		TopP:              req.TopP,
+		PresencePenalty:   req.PresencePenalty,
+		FrequencyPenalty:  req.FrequencyPenalty,
+		Stop:              req.Stop,
+		Seed:              req.Seed,
+		ResponseFormat:    respFormat,
+		Stream:            req.Stream,
+		Tools:             buildOpenAITools(req.Tools),
+		ToolChoice:        buildOpenAIToolChoice(req.ToolChoice),
+		ParallelToolCalls: req.ParallelToolCalls,
 	}
 	resp, err := p.Client.CreateChatCompletion(ctx, streamReq)
 	if err != nil {
@@ -507,16 +722,9 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 	}
 
 	result = &core.ChatCompletionResponse{
-		ID:    resp.ID,
-		Model: resp.Model,
-		Choices: []core.Choice{{
-			Index: 0,
-			Message: core.Message{
-				Role:    resp.Choices[0].Message.Role,
-				Content: resp.Choices[0].Message.Content,
-			},
-			FinishReason: string(resp.Choices[0].FinishReason),
-		}},
+		ID:      resp.ID,
+		Model:   resp.Model,
+		Choices: []core.Choice{buildCoreChoice(resp.Choices[0])},
 		Usage: core.Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,

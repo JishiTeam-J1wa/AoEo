@@ -206,6 +206,23 @@ func (c *Client) ChatCompleteStream(ctx context.Context, req core.ChatCompletion
 	return c.scheduler.ChatCompleteStream(ctx, req)
 }
 
+// ChatCompleteWithProvider sends a request to a specific provider by name.
+// It temporarily overrides the router to target only the named provider.
+func (c *Client) ChatCompleteWithProvider(ctx context.Context, providerName string, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
+	old := c.Router()
+	c.SetRouter(&core.SingleProviderRouter{Name: providerName})
+	defer c.SetRouter(old)
+	return c.ChatComplete(ctx, req)
+}
+
+// ChatCompleteStreamWithProvider sends a streaming request to a specific provider by name.
+func (c *Client) ChatCompleteStreamWithProvider(ctx context.Context, providerName string, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	old := c.Router()
+	c.SetRouter(&core.SingleProviderRouter{Name: providerName})
+	defer c.SetRouter(old)
+	return c.ChatCompleteStream(ctx, req)
+}
+
 // ListModels returns available models for the named provider.
 func (c *Client) ListModels(ctx context.Context, providerName string) ([]core.ModelInfo, error) {
 	return c.scheduler.ListModels(ctx, providerName)

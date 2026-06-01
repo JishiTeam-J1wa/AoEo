@@ -73,6 +73,11 @@
 │  ┌──────────────┐  ┌─────────────┐  ┌────────────────────┐  │
 │  │Graceful Shutd│  │EnvConfig     │  │Proxy/HTTPClient    │  │
 │  └──────────────┘  └─────────────┘  └────────────────────┘  │
+│  ┌──────────────┐  ┌─────────────┐  ┌────────────────────┐  │
+│  │   Storage    │  │              │  │                    │  │
+│  │ SQLite/MySQL │  │              │  │                    │  │
+│  │   /Postgres  │  │              │  │                    │  │
+│  └──────────────┘  └─────────────┘  └────────────────────┘  │
 └─────────┬──────────────────┬────────────────────┬──────────┘
           │                  │                    │
      ┌────┴────┬─────────────┴────────┐           │
@@ -99,32 +104,45 @@ type Provider interface {
     Name() string
     Config() ProviderConfig
     ChatComplete(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error)
+    ChatCompleteStream(ctx context.Context, req ChatCompletionRequest) (<-chan StreamCompletionResponse, error)
     IsAvailable() bool
     ListModels(ctx context.Context) ([]ModelInfo, error)
+    SetEmitter(e EventEmitter)
+    HealthCheck(ctx context.Context) error
 }
 ```
 
 **设计决策**：
-- 使用 `ChatComplete` 而非业务方法，保持通用性
+- 使用 `ChatComplete` + `ChatCompleteStream` 覆盖同步和流式两种调用模式
 - `ListModels` 是特色功能，很多 SDK 不提供
-- `IsAvailable` 包含熔断状态检查
+- `IsAvailable` 包含熔断状态检查（原子操作，无锁）
+- `SetEmitter` 支持 Provider 生命周期事件订阅
+- `HealthCheck` 支持后台探活（轻量 HTTP 探测，5s 超时）
 
 #### 2.2.2 BaseProvider — 公共基础设施
 
 ```go
 type BaseProvider struct {
     config ProviderConfig
-    // Circuit breaker state
-    failMu sync.Mutex; failCount int; failUntil time.Time
-    // System prompt override
-    sysMu sync.RWMutex; systemPromptOverride string
-    // Event emitter
-    emitterMu sync.RWMutex; emitter EventEmitter
+    // Circuit breaker state (atomic)
+    failCount atomic.Int32
+    failUntil atomic.Int64 // UnixNano
+    // System prompt override (atomic pointer)
+    sysPrompt atomic.Pointer[string]
+    // Event emitter (atomic.Value)
+    emitter atomic.Value
+    // Runtime health metrics (sliding window)
+    healthMu     sync.RWMutex
+    healthWindow [20]healthEntry
+    healthHead   int
+    healthCount  int
+    healthLatest atomic.Pointer[ProviderHealth]
 }
 ```
 
 包含：
 - **熔断器**：连续 3 次失败 → 60 秒冷却
+- **运行时健康追踪**：20 次调用滑动窗口，记录延迟/成功率/连续失败（`RecordHealthCheck` / `RecordCallResult`）
 - **系统提示词覆盖**：支持运行时动态替换
 - **模型列表查询**：统一通过 OpenAI-compatible `/models` 端点
 - **结构化日志**：使用 `log/slog` 记录熔断、失败、恢复事件
@@ -209,7 +227,7 @@ type CallRecord struct {
     ID string; Provider string; Model string
     Request ChatCompletionRequest; Response *ChatCompletionResponse
     Error string; LatencyMs int64; Timestamp time.Time
-    Tags []string; FallbackFrom string; Cost float64
+    Tags []string; FallbackFrom string; Cost float64; Currency string
 }
 
 type ProviderStats struct {
@@ -219,7 +237,8 @@ type ProviderStats struct {
 }
 ```
 
-- 线程安全的 ring buffer，自动丢弃最旧记录
+- 线程安全的 ring buffer（固定长度 O(maxSize)，无 append realloc），自动丢弃最旧记录
+- 可选持久化：通过 `SetStorage(core.Storage)` 将调用历史写入 SQLite/MySQL/Postgres
 - 自动按 Provider 聚合统计：调用次数、失败次数、延迟分布、总成本
 - 支持按标签过滤历史记录
 - `Currency` 由首次见到的记录价格决定，保持单 Provider 单币种语义
@@ -263,7 +282,9 @@ type Router interface {
 |---|---|---|
 | PrimaryRouter | 选第一个可用 | 默认行为，零开销 |
 | RoundRobinRouter | `atomic.Uint64` 轮询 | O(1)，自动跳过不可用 |
-| RandomRouter | `math/rand` 随机 | 简单负载分散 |
+| RandomRouter | `atomic.Uint64` 伪随机 | 简单负载分散 |
+| WeightedRouter | 按健康指标加权 | 支持 latency / success-rate / combined 策略 |
+| SingleProviderRouter | 强制指定 Provider | CLI 调试和定向调用 |
 
 **设计决策**：
 - `Select` 用于单次调用（`ChatComplete`）
@@ -271,9 +292,9 @@ type Router interface {
 - 使用 `atomic.Pointer[core.Router]` 支持运行时热切换
 - Scheduler 的 `PickPrimaryProvider` / `PickProviderRoundRobin` 保留为兼容方法，内部委托给 Router
 
-#### 2.2.10 HealthCheck — 后台探活
+#### 2.2.10 HealthCheck — 后台探活与 Provider 健康指标
 
-Provider 接口新增 `HealthCheck(ctx) error`：
+Provider 接口：
 
 ```go
 type Provider interface {
@@ -282,8 +303,25 @@ type Provider interface {
 }
 ```
 
-- `BaseProvider` 默认实现：HTTP GET Endpoint（5s 超时）
-- `OpenAIProvider` 可覆盖为更具体的检查（如轻量 ListModels）
+- `BaseProvider` 默认实现：HTTP GET Endpoint（5s 超时），结果自动记录到健康窗口
+- `OpenAIProvider` 可覆盖为更具体的检查
+
+**Provider 主动健康指标**：
+
+```go
+type ProviderHealth struct {
+    LastCheckAt      time.Time `json:"last_check_at"`
+    LastLatencyMs    int64     `json:"last_latency_ms"`
+    AvgLatencyMs     int64     `json:"avg_latency_ms"`
+    SuccessRate      float64   `json:"success_rate"`       // 0.0~1.0
+    ConsecutiveFails int       `json:"consecutive_fails"`
+    TotalChecks      int       `json:"total_checks"`
+}
+```
+
+- 每次 `HealthCheck` 和实际 API 调用后自动更新
+- 20 次滑动窗口，O(1) 更新，原子快照读取
+- `ProviderStatus` 携带 `Health` 字段，供 Router 做加权决策
 
 Scheduler 后台 goroutine：
 
@@ -294,6 +332,8 @@ s.SetHealthCheckInterval(0)          // 关闭探测
 
 **设计决策**：
 - 默认关闭，避免测试/短生命周期场景泄漏 goroutine
+- 健康检查失败直接触发熔断器 `RecordFailure`，加速 Provider 进入冷却
+- 健康检查成功触发 `RecordSuccess`，帮助 Provider 恢复
 - 失败调用 `RecordFailure()`，成功调用 `RecordSuccess()`，复用熔断器逻辑
 - 关闭 Scheduler 时自动 `stopHealthCheck()`，通过 `sync.WaitGroup` 保证 goroutine 退出
 - `healthCheckStop` 通道通过参数传递给 goroutine，避免 data race
@@ -316,7 +356,56 @@ type ProviderConfig struct {
 - 若提供了自定义 `HTTPClient`，保留其 `CheckRedirect`/`Jar`，覆盖 Transport 上的 `Proxy` 和 `TLSConfig`
 - 支持 `SkipTLSVerify` 与自定义 Transport 共存
 
-#### 2.2.12 EnvConfig — 环境变量配置源
+#### 2.2.12 CLI 工具
+
+```go
+go install github.com/JishiTeam-J1wa/AoEo/cmd/aoeo@latest
+```
+
+**子命令**：
+
+| 命令 | 说明 | 示例 |
+|---|---|---|
+| `list-models` | 列出所有 Provider 的可用模型 | `aoeo list-models` |
+| `test` | 对所有 Provider 执行健康检查 | `aoeo test` |
+| `status` | 查看 Provider 状态、延迟、成功率 | `aoeo status` |
+| `chat` | 单次对话 | `aoeo chat -message "Hello" -provider deepseek` |
+| `stream` | 流式对话 | `aoeo stream -message "Explain Go"` |
+
+**实现**：Go 标准库 `flag`，零外部依赖，复用 `LoadConfigFromEnv()` 加载配置。
+
+#### 2.2.13 Storage — 持久化存储层
+
+```go
+type Storage interface {
+    RecordCall(ctx context.Context, r CallRecord) error
+    GetCalls(ctx context.Context, limit int) ([]CallRecord, error)
+    GetCallsByTag(ctx context.Context, tag string, limit int) ([]CallRecord, error)
+    GetCallsByProvider(ctx context.Context, provider string, limit int) ([]CallRecord, error)
+    GetProviderStats(ctx context.Context) (map[string]ProviderStats, error)
+
+    RecordAudit(ctx context.Context, e AuditEvent) error
+    GetAudits(ctx context.Context, limit int) ([]AuditEvent, error)
+
+    CreateMapping(ctx context.Context, m PrivacyMapping) error
+    FindFake(ctx context.Context, sessionID, original string) (string, bool, error)
+    FindOriginal(ctx context.Context, sessionID, fake string) (string, bool, error)
+    GetMappings(ctx context.Context, sessionID string) ([]PrivacyMapping, error)
+    DeleteMappingsBySession(ctx context.Context, sessionID string) error
+    CleanupMappings(ctx context.Context, before time.Time) error
+
+    Close() error
+}
+```
+
+**设计决策**：
+- 统一接口，三种后端：SQLite（纯 Go，零 CGO）、MySQL、PostgreSQL
+- Schema 统一：calls（调用历史）、audits（审计日志）、privacy_mappings（隐私映射）
+- History 通过 `SetStorage()` 注入，Record 时异步写入，查询时优先读数据库
+- Privacy Gateway 通过 `GatewayConfig.Storage` 注入，支持跨会话持久化映射关系
+- 占位符自适应：SQLite/MySQL 用 `?`，Postgres 用 `$1, $2...`
+
+#### 2.2.13 EnvConfig — 环境变量配置源
 
 ```go
 cfg := aoeo.LoadConfigFromEnv()
@@ -531,8 +620,8 @@ type EventEmitter interface {
 |---|---|---|
 | 对话历史维护 | 用户代码 | 状态管理应由调用方控制 |
 | RAG 检索 | 用户代码 | 与向量数据库耦合 |
-| Tool Calling | 未来可能扩展 | 各家实现差异大 |
-| 权重路由 | 未来可能扩展 | 需质量评估数据 |
+| Tool Calling | **已实现** | 统一 `Tool`/`ToolCall`/`FunctionDefinition` 抽象 |
+| 权重路由 | **已实现** | 基于运行时健康指标加权选择 |
 | Provider 插件机制 | 未来可能扩展 | 动态加载复杂度高 |
 
 **AoEo 做的事情**：
@@ -647,12 +736,17 @@ scheduler := aoeo.NewScheduler(providers...)
 - [x] 预留 OpenAI Privacy Filter 模型接入接口
 - [x] 完整使用手册（PRIVACY_GATEWAY.md）
 
-### Phase 4 — 生态
-- [ ] 权重路由（按价格/速度/质量加权）
-- [ ] CLI 工具（`aoeo list-models`, `aoeo test`）
+### Phase 4 — 生态扩展（已完成）
+- [x] 权重路由（按延迟/成功率加权，`WeightedRouter`）
+- [x] Provider 主动健康检查心跳（20 次滑动窗口，`ProviderHealth`）
+- [x] Function Calling 抽象层（`Tool`/`ToolCall`/`FunctionDefinition`）
+- [x] CLI 工具（`aoeo list-models` / `test` / `status` / `chat` / `stream`）
+
+### Phase 5 — 未来方向
+- [ ] 权重路由扩展：按成本/自定义评分函数加权
 - [ ] 与 Langfuse / LangSmith 集成
-- [ ] Function Calling 抽象层
 - [ ] Provider 插件机制（动态加载）
+- [ ] 分布式调度：多节点状态同步
 
 ---
 

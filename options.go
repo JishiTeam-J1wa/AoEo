@@ -85,6 +85,32 @@ func WithSeed(seed int) Option {
 	}
 }
 
+// WithTools attaches a list of tools (functions) the model may call.
+func WithTools(tools []core.Tool) Option {
+	return func(req *core.ChatCompletionRequest) {
+		if len(tools) > 0 {
+			copied := make([]core.Tool, len(tools))
+			copy(copied, tools)
+			req.Tools = copied
+		}
+	}
+}
+
+// WithToolChoice sets how the model should use tools.
+// Accepts "none", "auto", "required", or a ToolChoice value.
+func WithToolChoice(choice any) Option {
+	return func(req *core.ChatCompletionRequest) {
+		req.ToolChoice = choice
+	}
+}
+
+// WithParallelToolCalls enables or disables parallel tool calling.
+func WithParallelToolCalls(v bool) Option {
+	return func(req *core.ChatCompletionRequest) {
+		req.ParallelToolCalls = v
+	}
+}
+
 // BuildRequest creates a ChatCompletionRequest from messages and options.
 func BuildRequest(messages []core.Message, opts ...Option) core.ChatCompletionRequest {
 	copied := make([]core.Message, len(messages))

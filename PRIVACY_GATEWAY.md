@@ -111,6 +111,7 @@ import (
 
     aoeo "github.com/JishiTeam-J1wa/AoEo"
     "github.com/JishiTeam-J1wa/AoEo/privacy"
+    "github.com/JishiTeam-J1wa/AoEo/storage"
 )
 
 func main() {
@@ -120,17 +121,25 @@ func main() {
         log.Fatalf("load rules: %v", err)
     }
 
-    // 2. 创建隐私网关
+    // 2. 创建持久化存储（生产环境建议使用 MySQL/Postgres）
+    store, err := storage.NewSQLite("privacy_mappings.db")
+    if err != nil {
+        log.Fatalf("new storage: %v", err)
+    }
+    defer store.Close()
+
+    // 3. 创建隐私网关
     gateway, err := privacy.NewGateway(privacy.GatewayConfig{
-        Rules:  privacy.NewRuleEngine(rules),
-        Policy: privacy.ActionPseudonymize,
+        Rules:   privacy.NewRuleEngine(rules),
+        Policy:  privacy.ActionPseudonymize,
+        Storage: store, // 注入持久化后端
     })
     if err != nil {
         log.Fatalf("new gateway: %v", err)
     }
     defer gateway.Close()
 
-    // 3. 创建 AoEo 客户端，注入隐私拦截器
+    // 4. 创建 AoEo 客户端，注入隐私拦截器
     client, err := aoeo.NewClient(
         aoeo.Config{
             Providers: []aoeo.ProviderConfig{
@@ -149,7 +158,7 @@ func main() {
     }
     defer client.Close()
 
-    // 4. 正常调用
+    // 5. 正常调用
     resp, err := client.ChatComplete(context.Background(),
         aoeo.BuildRequest([]aoeo.Message{
             {Role: "user", Content: "我叫张三，服务器IP是192.168.1.100"},
@@ -268,14 +277,17 @@ for chunk := range stream {
 
 ---
 
-## 8. 与 Privacy Filter 模型集成（可选）
+## 8. 与 Privacy Filter 模型集成（可选，预留接口）
+
+> ⚠️ **当前状态**：`ModelDetector` 接口已预留，但 ONNX 运行时实现尚未完成。以下为 planned API，供参考。
 
 ```go
-model := privacy.NewONNXDetector("./models/openai-privacy-filter")
+// TODO: 需自行实现 ONNX 运行时适配器
+// model := privacy.NewONNXDetector("./models/openai-privacy-filter")
 
 gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
     Rules:         privacy.NewRuleEngine(rules),
-    ModelDetector: model,
+    // ModelDetector: model,  // 预留接口
     Policy:        privacy.ActionPseudonymize,
 })
 ```
@@ -302,12 +314,17 @@ A：当前版本需要重新 LoadRuleDatabase。后续版本支持热重载。
 
 | 文件 | 说明 |
 |---|---|
-| privacy/types.go | 类型定义 |
-| privacy/store.go | SQLite 映射表 |
-| privacy/generator.go | 伪造数据生成器 |
-| privacy/detector.go | 检测器接口 |
-| privacy/rules.go | 本地规则引擎 |
-| privacy/pseudonymizer.go | 核心伪匿名化器 |
-| privacy/gateway.go | AoEo Interceptor 集成 |
-| examples/privacy/main.go | 完整示例 |
-| examples/privacy/privacy_rules.yaml | 示例规则 |
+| `core/storage.go` | 统一持久化接口定义（CallHistory / AuditLog / PrivacyMapping） |
+| `storage/base.go` | 公共 SQL CRUD 实现（自动适配 SQLite `?` / MySQL `?` / Postgres `$N`） |
+| `storage/sqlite.go` | SQLite 后端工厂（`:memory:` 或文件路径） |
+| `storage/mysql.go` | MySQL 后端工厂 |
+| `storage/postgres.go` | PostgreSQL 后端工厂 |
+| `privacy/types.go` | Privacy 类型定义 |
+| `privacy/store.go` | 映射表兼容层（基于 `core.Storage`） |
+| `privacy/generator.go` | 伪造数据生成器 |
+| `privacy/detector.go` | 检测器接口（含 `ModelDetector` 预留） |
+| `privacy/rules.go` | 本地规则引擎 |
+| `privacy/pseudonymizer.go` | 核心伪匿名化器 |
+| `privacy/gateway.go` | AoEo Interceptor 集成 |
+| `examples/privacy/main.go` | 完整示例 |
+| `examples/privacy/privacy_rules.yaml` | 示例规则 |
