@@ -1,9 +1,11 @@
 package privacy
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
 )
@@ -12,13 +14,13 @@ import (
 // It detects sensitive values, replaces them with realistic fakes,
 // and can restore the original values from AI responses.
 type Pseudonymizer struct {
-	store     *MappingStore
+	store     core.Storage
 	generator *FakeGenerator
 	detector  Detector
 }
 
 // NewPseudonymizer creates a new pseudonymizer.
-func NewPseudonymizer(store *MappingStore, generator *FakeGenerator, detector Detector) *Pseudonymizer {
+func NewPseudonymizer(store core.Storage, generator *FakeGenerator, detector Detector) *Pseudonymizer {
 	return &Pseudonymizer{
 		store:     store,
 		generator: generator,
@@ -29,7 +31,7 @@ func NewPseudonymizer(store *MappingStore, generator *FakeGenerator, detector De
 // PseudonymizeRequest processes a request before it leaves for the AI provider.
 // It returns a new request with sensitive values replaced, and the list of
 // mappings created during this operation.
-func (p *Pseudonymizer) PseudonymizeRequest(sessionID string, req *core.ChatCompletionRequest) (*core.ChatCompletionRequest, []MappingEntry, error) {
+func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID string, req *core.ChatCompletionRequest) (*core.ChatCompletionRequest, []core.PrivacyMapping, error) {
 	// Aggregate all message contents.
 	parts := make([]string, len(req.Messages))
 	for i, m := range req.Messages {
@@ -52,7 +54,7 @@ func (p *Pseudonymizer) PseudonymizeRequest(sessionID string, req *core.ChatComp
 
 	// 3. Build replacements, reusing existing mappings when possible.
 	replacements := make(map[string]string) // original -> fake
-	var mappings []MappingEntry
+	var mappings []core.PrivacyMapping
 
 	for _, span := range spans {
 		original := span.Original
@@ -61,7 +63,7 @@ func (p *Pseudonymizer) PseudonymizeRequest(sessionID string, req *core.ChatComp
 		}
 
 		// Check if we already have a mapping for this value.
-		if fake, ok := p.store.FindFake(sessionID, original); ok {
+		if fake, ok, _ := p.store.FindFake(ctx, sessionID, original); ok {
 			replacements[original] = fake
 			continue
 		}
@@ -70,22 +72,28 @@ func (p *Pseudonymizer) PseudonymizeRequest(sessionID string, req *core.ChatComp
 		fake := p.generator.Generate(span.Label, original)
 
 		// Ensure no collision with existing fakes in this session.
-		for p.store.ExistsFake(sessionID, fake) {
+		for {
+			_, exists, _ := p.store.FindOriginal(ctx, sessionID, fake)
+			if !exists {
+				break
+			}
 			fake = p.generator.Generate(span.Label, original)
 		}
 
 		// Persist the mapping.
-		if err := p.store.Create(sessionID, original, fake, span.Label); err != nil {
+		m := core.PrivacyMapping{
+			SessionID: sessionID,
+			Original:  original,
+			Fake:      fake,
+			Type:      string(span.Label),
+			CreatedAt: time.Now(),
+		}
+		if err := p.store.CreateMapping(ctx, m); err != nil {
 			return nil, nil, fmt.Errorf("create mapping: %w", err)
 		}
 
 		replacements[original] = fake
-		mappings = append(mappings, MappingEntry{
-			SessionID: sessionID,
-			Original:  original,
-			Fake:      fake,
-			Type:      span.Label,
-		})
+		mappings = append(mappings, m)
 	}
 
 	// 4. Apply replacements to each message individually.
@@ -101,12 +109,12 @@ func (p *Pseudonymizer) PseudonymizeRequest(sessionID string, req *core.ChatComp
 
 // RestoreResponse processes an AI response, restoring fake values back to
 // their originals.
-func (p *Pseudonymizer) RestoreResponse(sessionID string, resp *core.ChatCompletionResponse) (*core.ChatCompletionResponse, error) {
+func (p *Pseudonymizer) RestoreResponse(ctx context.Context, sessionID string, resp *core.ChatCompletionResponse) (*core.ChatCompletionResponse, error) {
 	if resp == nil {
 		return nil, nil
 	}
 
-	mappings, err := p.store.GetSessionMappings(sessionID)
+	mappings, err := p.store.GetMappings(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load mappings: %w", err)
 	}
@@ -131,12 +139,12 @@ func (p *Pseudonymizer) RestoreResponse(sessionID string, resp *core.ChatComplet
 }
 
 // RestoreStreamChunk restores fake values in a streaming chunk.
-func (p *Pseudonymizer) RestoreStreamChunk(sessionID string, chunk *core.StreamCompletionResponse) {
+func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string, chunk *core.StreamCompletionResponse) {
 	if chunk == nil || chunk.Err != nil {
 		return
 	}
 
-	mappings, err := p.store.GetSessionMappings(sessionID)
+	mappings, err := p.store.GetMappings(ctx, sessionID)
 	if err != nil || len(mappings) == 0 {
 		return
 	}

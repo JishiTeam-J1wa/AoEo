@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/storage"
 )
 
 // GatewayConfig configures the privacy gateway.
 type GatewayConfig struct {
-	// Store is the mapping database. If nil, an in-memory store is created.
-	Store *MappingStore
+	// Storage is the persistent backend for mappings. If nil, an in-memory SQLite store is created.
+	Storage core.Storage
 
 	// Generator produces fake values. If nil, a default generator is used.
 	Generator *FakeGenerator
@@ -41,12 +42,12 @@ type Gateway struct {
 
 // NewGateway creates a new privacy gateway.
 func NewGateway(cfg GatewayConfig) (*Gateway, error) {
-	store := cfg.Store
+	store := cfg.Storage
 	if store == nil {
 		var err error
-		store, err = OpenMappingStore(":memory:")
+		store, err = storage.NewSQLite(":memory:")
 		if err != nil {
-			return nil, fmt.Errorf("open default mapping store: %w", err)
+			return nil, fmt.Errorf("open default storage: %w", err)
 		}
 	}
 
@@ -82,7 +83,7 @@ func (g *Gateway) Close() error {
 func (g *Gateway) BeforeRequest(ctx context.Context, req *core.ChatCompletionRequest) error {
 	sessionID := extractSessionID(ctx, req)
 
-	newReq, _, err := g.pseudonymizer.PseudonymizeRequest(sessionID, req)
+	newReq, _, err := g.pseudonymizer.PseudonymizeRequest(ctx, sessionID, req)
 	if err != nil {
 		return fmt.Errorf("privacy gateway: %w", err)
 	}
@@ -99,7 +100,7 @@ func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequ
 	}
 
 	sessionID := extractSessionID(ctx, &req)
-	restored, rerr := g.pseudonymizer.RestoreResponse(sessionID, resp)
+	restored, rerr := g.pseudonymizer.RestoreResponse(ctx, sessionID, resp)
 	if rerr != nil {
 		return nil, fmt.Errorf("privacy restore: %w", rerr)
 	}
@@ -113,7 +114,7 @@ func (g *Gateway) AfterStreamChunk(ctx context.Context, req core.ChatCompletionR
 
 	// Wrap in StreamCompletionResponse for the pseudonymizer.
 	wrapped := &core.StreamCompletionResponse{Chunk: *chunk}
-	g.pseudonymizer.RestoreStreamChunk(sessionID, wrapped)
+	g.pseudonymizer.RestoreStreamChunk(ctx, sessionID, wrapped)
 	*chunk = wrapped.Chunk
 
 	return nil

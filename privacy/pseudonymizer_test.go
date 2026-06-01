@@ -1,10 +1,12 @@
 package privacy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/storage"
 )
 
 // mockDetector simulates the Privacy Filter model for testing.
@@ -26,7 +28,7 @@ func (a *modelDetectAdapter) Detect(text string) []Span {
 }
 
 func TestPseudonymizer_BasicPseudonymize(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
 	gen := NewFakeGenerator(42)
@@ -46,7 +48,8 @@ func TestPseudonymizer_BasicPseudonymize(t *testing.T) {
 		},
 	}
 
-	newReq, mappings, err := ps.PseudonymizeRequest("sess-1", req)
+	ctx := context.Background()
+	newReq, mappings, err := ps.PseudonymizeRequest(ctx, "sess-1", req)
 	if err != nil {
 		t.Fatalf("pseudonymize: %v", err)
 	}
@@ -73,7 +76,7 @@ func TestPseudonymizer_BasicPseudonymize(t *testing.T) {
 }
 
 func TestPseudonymizer_ConsistentMapping(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
 	gen := NewFakeGenerator(42)
@@ -84,18 +87,19 @@ func TestPseudonymizer_ConsistentMapping(t *testing.T) {
 	}
 
 	ps := NewPseudonymizer(store, gen, detector)
+	ctx := context.Background()
 
 	req1 := &core.ChatCompletionRequest{
 		Messages: []core.Message{{Role: "user", Content: "IP: 192.168.1.1"}},
 	}
-	newReq1, _, _ := ps.PseudonymizeRequest("sess-1", req1)
+	newReq1, _, _ := ps.PseudonymizeRequest(ctx, "sess-1", req1)
 	fake1 := newReq1.Messages[0].Content
 
 	// Second call with same original should reuse the same fake.
 	req2 := &core.ChatCompletionRequest{
 		Messages: []core.Message{{Role: "user", Content: "Again IP: 192.168.1.1"}},
 	}
-	newReq2, _, _ := ps.PseudonymizeRequest("sess-1", req2)
+	newReq2, _, _ := ps.PseudonymizeRequest(ctx, "sess-1", req2)
 	fake2 := newReq2.Messages[0].Content
 
 	// Both should contain the same fake IP.
@@ -107,14 +111,14 @@ func TestPseudonymizer_ConsistentMapping(t *testing.T) {
 
 	// Extract the fake IP from both and compare.
 	// The fake IP should be identical because we reused the mapping.
-	entries, _ := store.GetSessionMappings("sess-1")
+	entries, _ := store.GetMappings(ctx, "sess-1")
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 mapping, got %d", len(entries))
 	}
 }
 
 func TestPseudonymizer_RestoreResponse(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
 	gen := NewFakeGenerator(42)
@@ -125,27 +129,29 @@ func TestPseudonymizer_RestoreResponse(t *testing.T) {
 	}
 
 	ps := NewPseudonymizer(store, gen, detector)
+	ctx := context.Background()
 
 	// First pseudonymize to create the mapping.
 	req := &core.ChatCompletionRequest{
 		Messages: []core.Message{{Role: "user", Content: "IP: 192.168.1.1"}},
 	}
-	ps.PseudonymizeRequest("sess-1", req)
+	ps.PseudonymizeRequest(ctx, "sess-1", req)
 
-	// Simulate AI response with fake IP.
-	entries, _ := store.GetSessionMappings("sess-1")
+	// Find the fake IP.
+	entries, _ := store.GetMappings(ctx, "sess-1")
 	if len(entries) == 0 {
-		t.Fatal("no mappings created")
+		t.Fatal("no mappings")
 	}
 	fakeIP := entries[0].Fake
 
+	// Simulate AI response with fake IP.
 	resp := &core.ChatCompletionResponse{
 		Choices: []core.Choice{
 			{Message: core.Message{Content: "服务器地址是 " + fakeIP}},
 		},
 	}
 
-	restored, err := ps.RestoreResponse("sess-1", resp)
+	restored, err := ps.RestoreResponse(ctx, "sess-1", resp)
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -160,18 +166,19 @@ func TestPseudonymizer_RestoreResponse(t *testing.T) {
 }
 
 func TestPseudonymizer_NoSensitiveData(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
 	gen := NewFakeGenerator(42)
 	detector := &mockDetector{spans: nil}
 
 	ps := NewPseudonymizer(store, gen, detector)
+	ctx := context.Background()
 
 	req := &core.ChatCompletionRequest{
 		Messages: []core.Message{{Role: "user", Content: "Hello world"}},
 	}
-	newReq, mappings, err := ps.PseudonymizeRequest("sess-1", req)
+	newReq, mappings, err := ps.PseudonymizeRequest(ctx, "sess-1", req)
 	if err != nil {
 		t.Fatalf("pseudonymize: %v", err)
 	}

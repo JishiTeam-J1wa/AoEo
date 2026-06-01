@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/storage"
 )
 
 func TestGateway_BeforeRequest(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
 	gen := NewFakeGenerator(42)
@@ -19,7 +20,7 @@ func TestGateway_BeforeRequest(t *testing.T) {
 	}}
 
 	gw, err := NewGateway(GatewayConfig{
-		Store:         store,
+		Storage:       store,
 		Generator:     gen,
 		ModelDetector: detector,
 	})
@@ -45,7 +46,7 @@ func TestGateway_BeforeRequest(t *testing.T) {
 }
 
 func TestGateway_AfterResponse(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
 	gen := NewFakeGenerator(42)
@@ -56,7 +57,7 @@ func TestGateway_AfterResponse(t *testing.T) {
 	}}
 
 	gw, err := NewGateway(GatewayConfig{
-		Store:         store,
+		Storage:       store,
 		Generator:     gen,
 		ModelDetector: detector,
 	})
@@ -74,7 +75,7 @@ func TestGateway_AfterResponse(t *testing.T) {
 	gw.BeforeRequest(context.Background(), &req)
 
 	// Find the fake IP.
-	entries, _ := store.GetSessionMappings("default")
+	entries, _ := store.GetMappings(context.Background(), "default")
 	if len(entries) == 0 {
 		t.Fatal("no mappings")
 	}
@@ -99,10 +100,10 @@ func TestGateway_AfterResponse(t *testing.T) {
 }
 
 func TestGateway_ToInterceptor(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
-	gw, _ := NewGateway(GatewayConfig{Store: store})
+	gw, _ := NewGateway(GatewayConfig{Storage: store})
 	defer gw.Close()
 
 	ic := gw.ToInterceptor()
@@ -121,10 +122,10 @@ func TestGateway_ToInterceptor(t *testing.T) {
 }
 
 func TestGateway_NoDetection(t *testing.T) {
-	store, _ := OpenMappingStore(":memory:")
+	store, _ := storage.NewSQLite(":memory:")
 	defer store.Close()
 
-	gw, _ := NewGateway(GatewayConfig{Store: store})
+	gw, _ := NewGateway(GatewayConfig{Storage: store})
 	defer gw.Close()
 
 	req := &core.ChatCompletionRequest{
