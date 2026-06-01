@@ -403,18 +403,18 @@ client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gateway.ToInterceptor()))
 ```
 
 **双层检测**：
-- **本地规则引擎**：IP 黑白名单、CIDR 网段、域名过滤、关键词、正则匹配
+- **本地规则引擎**：IP 黑白名单 / CIDR 网段、域名过滤、关键词、正则匹配
 - **Privacy Filter 模型**：OpenAI Privacy Filter 本地模型检测姓名、电话、身份证、密钥等 PII
 
 **处理策略**：
-| 策略 | 行为 |
-|---|---|
-| `block` | 检测到敏感数据直接阻断请求 |
-| `mask` | 替换为 `[REDACTED]` |
-| `pseudonymize` | 替换为逼真的伪造值（可逆还原） |
-| `audit` | 放行但记录审计日志 |
+| 策略 | 行为 | 适用场景 |
+|---|---|---|
+| `block` | 检测到敏感数据直接阻断请求 | 高安全环境 |
+| `mask` | 替换为 `[REDACTED]` | 审计日志 |
+| `pseudonymize` | 替换为逼真的伪造值，返回时自动还原 | **生产推荐** |
+| `audit` | 放行但记录审计日志 | 灰度观察 |
 
-用户始终看到原始内容，AI 只能接触到伪造数据。映射关系保存在本地 SQLite，支持会话隔离和 TTL 清理。
+**完整使用手册**：见 [PRIVACY_GATEWAY.md](./PRIVACY_GATEWAY.md)
 
 ---
 

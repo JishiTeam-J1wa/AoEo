@@ -638,6 +638,15 @@ scheduler := aoeo.NewScheduler(providers...)
 - [x] Provider 后台健康检查（`HealthCheck` 接口 + 定时 goroutine，复用熔断器）
 - [x] 补全流式 / buildRecord / Client / Retry / Router / HealthCheck 测试，覆盖率 71.7% → 70.8%
 
+### Phase 3.6 — 隐私安全网关（已完成）
+- [x] 本地规则引擎（IP 黑白名单 / CIDR / 域名 / 关键词 / 正则）
+- [x] 可逆伪匿名化（Pseudonymization）：原始值 ↔ 伪造值映射，SQLite 持久化
+- [x] 伪造数据生成器（IP、域名、姓名、电话、身份证号、密钥等）
+- [x] AoEo Gateway 集成（BeforeRequest / AfterResponse / AfterStreamChunk / AfterStreamDone）
+- [x] 会话隔离 + TTL 清理
+- [x] 预留 OpenAI Privacy Filter 模型接入接口
+- [x] 完整使用手册（PRIVACY_GATEWAY.md）
+
 ### Phase 4 — 生态
 - [ ] 权重路由（按价格/速度/质量加权）
 - [ ] CLI 工具（`aoeo list-models`, `aoeo test`）
