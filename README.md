@@ -20,6 +20,7 @@ AoEo 让你在代码中用统一的接口调用多个大模型 API（DeepSeek、
 | **Prompt 统一管理** | 按 Provider/模型通配注入系统提示，无需改动业务代码 |
 | **成本透明化** | 每次调用自动计算 Token 成本，按 Provider 聚合统计 |
 | **后台健康检查** | 定期探测 Provider 可用性，自动触发熔断/恢复 |
+| **隐私安全网关** | 本地 PII 检测 + 规则过滤，敏感数据出网前自动替换伪造值 |
 | **生产级稳定性** | 熔断器 + 自适应限流 + Panic 恢复 + 优雅关闭 |
 
 ---
@@ -383,6 +384,38 @@ cfg := aoeo.Config{
 
 优先级：自定义 `HTTPClient` > `Proxy` 字段 > 环境变量 `HTTP_PROXY`。
 
+### 16. 隐私安全网关
+
+AoEo 内置可逆隐私网关，确保敏感信息（PII、内网 IP、内部域名、身份证号等）在出网前被替换为伪造值，AI 响应返回时自动还原：
+
+```go
+// 加载本地规则库
+rules, _ := privacy.LoadRuleDatabase("privacy_rules.yaml")
+
+// 创建隐私网关
+gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
+    Rules:  privacy.NewRuleEngine(rules),
+    Policy: privacy.ActionPseudonymize,
+})
+
+// 接入 AoEo
+client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gateway.ToInterceptor()))
+```
+
+**双层检测**：
+- **本地规则引擎**：IP 黑白名单、CIDR 网段、域名过滤、关键词、正则匹配
+- **Privacy Filter 模型**：OpenAI Privacy Filter 本地模型检测姓名、电话、身份证、密钥等 PII
+
+**处理策略**：
+| 策略 | 行为 |
+|---|---|
+| `block` | 检测到敏感数据直接阻断请求 |
+| `mask` | 替换为 `[REDACTED]` |
+| `pseudonymize` | 替换为逼真的伪造值（可逆还原） |
+| `audit` | 放行但记录审计日志 |
+
+用户始终看到原始内容，AI 只能接触到伪造数据。映射关系保存在本地 SQLite，支持会话隔离和 TTL 清理。
+
 ---
 
 ## 支持的 Provider
@@ -427,6 +460,14 @@ AoEo/
 │   └── logger.go      # 结构化日志
 ├── providers/         # Provider 接口和实现
 │   └── providers.go   # Provider 接口 + BaseProvider + OpenAI + 内置 Provider
+├── privacy/           # 隐私安全网关
+│   ├── types.go           # 类型定义（EntityType, Span, Mapping）
+│   ├── store.go           # SQLite 映射表存储
+│   ├── generator.go       # 伪造数据生成器
+│   ├── detector.go        # 检测器接口
+│   ├── rules.go           # 本地规则引擎（IP/域名/关键词/正则）
+│   ├── pseudonymizer.go   # 核心伪匿名化器（检测→替换→回溯）
+│   └── gateway.go         # AoEo Interceptor 集成
 ├── internal/          # 内部实现
 │   └── engine/
 │       ├── scheduler.go   # 调度核心 + 选项
