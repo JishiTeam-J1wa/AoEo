@@ -728,13 +728,22 @@ scheduler := aoeo.NewScheduler(providers...)
 - [x] 补全流式 / buildRecord / Client / Retry / Router / HealthCheck 测试，覆盖率 71.7% → 70.8%
 
 ### Phase 3.6 — 隐私安全网关（已完成）
-- [x] 本地规则引擎（IP 黑白名单 / CIDR / 域名 / 关键词 / 正则）
-- [x] 可逆伪匿名化（Pseudonymization）：原始值 ↔ 伪造值映射，SQLite 持久化
-- [x] 伪造数据生成器（IP、域名、姓名、电话、身份证号、密钥等）
-- [x] AoEo Gateway 集成（BeforeRequest / AfterResponse / AfterStreamChunk / AfterStreamDone）
-- [x] 会话隔离 + TTL 清理
-- [x] 预留 OpenAI Privacy Filter 模型接入接口
-- [x] 完整使用手册（PRIVACY_GATEWAY.md）
+- [x] **纯 AI 模型检测**：删除本地规则引擎，完全依赖 HuggingFace NER 模型检测 PII
+- [x] **可逆伪匿名化（Pseudonymization）**：原始值 ↔ 伪造值映射，Pebble KV 持久化
+- [x] **伪造数据生成器**（IP、域名、姓名、电话、身份证号、密钥等）
+- [x] **AoEo Gateway 集成**（BeforeRequest / AfterResponse / AfterStreamChunk / AfterStreamDone）
+- [x] **会话隔离 + TTL 清理**
+- [x] **Sidecar 微服务化**：FastAPI + HuggingFace，独立部署
+- [x] **FailOpen**：sidecar 故障时可选透传，不阻断业务
+- [x] **全链路日志**：Go 侧（检测/替换/还原/失败）+ Sidecar 侧（spans/latency）
+
+### Phase 3.7 — 隐私网关微服务化优化（已完成）
+- [x] **批量检测 API**：`DetectBatch`，N 条 message 合并为 1 次 HTTP 往返
+- [x] **智能负载均衡（LeastLatency）**：EWMA 延迟 + 加权路由，自动选择最快 Sidecar
+- [x] **HTTP/2 强制启用**：`ForceAttemptHTTP2: true`，连接复用
+- [x] **连接预热**：启动时自动预热 TCP / HTTP/2 连接，消除首包延迟
+- [x] **客户端负载均衡**：内置 `LoadBalancedClient`，无需 Nginx 即可多实例部署
+- [x] **健康检查 + 故障剔除/恢复**：每 10 秒自动探测，故障节点自动隔离
 
 ### Phase 4 — 生态扩展（已完成）
 - [x] 权重路由（按延迟/成功率加权，`WeightedRouter`）
@@ -747,6 +756,8 @@ scheduler := aoeo.NewScheduler(providers...)
 - [ ] 与 Langfuse / LangSmith 集成
 - [ ] Provider 插件机制（动态加载）
 - [ ] 分布式调度：多节点状态同步
+- [ ] Sidecar 模型热更新：无需重启更换检测模型
+- [ ] 批量检测并行化：Sidecar 端多 GPU 并行 inference
 
 ---
 

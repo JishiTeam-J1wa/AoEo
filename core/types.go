@@ -81,6 +81,10 @@ type ChatCompletionRequest struct {
 	Tools             []Tool         `json:"tools,omitempty"`
 	ToolChoice        any            `json:"tool_choice,omitempty"` // "none" | "auto" | "required" or ToolChoice
 	ParallelToolCalls bool           `json:"parallel_tool_calls,omitempty"`
+
+	// Metadata is an in-memory map for interceptors to pass data between
+	// BeforeRequest and AfterResponse hooks. It is not serialized to JSON.
+	Metadata map[string]any `json:"-"`
 }
 
 // Validate checks the request for common misconfigurations.
@@ -214,6 +218,12 @@ func (req ChatCompletionRequest) Clone() ChatCompletionRequest {
 	if len(req.Tools) > 0 {
 		cloned.Tools = make([]Tool, len(req.Tools))
 		copy(cloned.Tools, req.Tools)
+	}
+	if len(req.Metadata) > 0 {
+		cloned.Metadata = make(map[string]any, len(req.Metadata))
+		for k, v := range req.Metadata {
+			cloned.Metadata[k] = v
+		}
 	}
 	return cloned
 }

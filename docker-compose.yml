@@ -1,0 +1,86 @@
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Privacy Model Cluster (3 replicas)
+  # ---------------------------------------------------------------------------
+  privacy-sidecar-1:
+    build:
+      context: ./cmd/privacy-sidecar
+      dockerfile: Dockerfile
+    environment:
+      - MODEL_PATH=/app/models
+      - DEVICE=cpu
+      - PORT=8080
+      - LOG_LEVEL=info
+    volumes:
+      - ./models:/app/models:ro
+    networks:
+      - aoeo
+
+  privacy-sidecar-2:
+    build:
+      context: ./cmd/privacy-sidecar
+      dockerfile: Dockerfile
+    environment:
+      - MODEL_PATH=/app/models
+      - DEVICE=cpu
+      - PORT=8080
+      - LOG_LEVEL=info
+    volumes:
+      - ./models:/app/models:ro
+    networks:
+      - aoeo
+
+  privacy-sidecar-3:
+    build:
+      context: ./cmd/privacy-sidecar
+      dockerfile: Dockerfile
+    environment:
+      - MODEL_PATH=/app/models
+      - DEVICE=cpu
+      - PORT=8080
+      - LOG_LEVEL=info
+    volumes:
+      - ./models:/app/models:ro
+    networks:
+      - aoeo
+
+  # ---------------------------------------------------------------------------
+  # Nginx Load Balancer
+  # ---------------------------------------------------------------------------
+  nginx-lb:
+    image: nginx:alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - privacy-sidecar-1
+      - privacy-sidecar-2
+      - privacy-sidecar-3
+    networks:
+      - aoeo
+
+  # ---------------------------------------------------------------------------
+  # AoEo AI Gateway
+  # ---------------------------------------------------------------------------
+  aoeo-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - AOEO_PRIVACY_ENABLED=true
+      - AOEO_PRIVACY_ENDPOINT=http://nginx-lb:8080
+      - AOEO_PRIVACY_POLICY=pseudonymize
+      - AOEO_PRIVACY_FAILOPEN=false
+    depends_on:
+      - nginx-lb
+    networks:
+      - aoeo
+
+networks:
+  aoeo:
+    driver: bridge

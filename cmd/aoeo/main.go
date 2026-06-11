@@ -11,6 +11,7 @@ import (
 
 	aoeo "github.com/JishiTeam-J1wa/AoEo"
 	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/JishiTeam-J1wa/AoEo/privacy"
 )
 
 func main() {
@@ -52,6 +53,7 @@ Commands:
   status        Show provider status, latency, and success rate
   chat          Send a single chat completion
   stream        Send a streaming chat completion
+  privacy       Check privacy filter sidecar status
 
 Examples:
   aoeo test
@@ -65,7 +67,7 @@ func loadClient() (*aoeo.Client, error) {
 	if len(cfg.Providers) == 0 {
 		return nil, fmt.Errorf("no providers configured; set AOEO_PROVIDER_0_NAME etc.")
 	}
-	return aoeo.NewClient(cfg)
+	return aoeo.NewClient(cfg, privacy.WithPrivacyFilter())
 }
 
 // ---------- list-models ----------
@@ -268,4 +270,52 @@ func cmdStream(args []string) {
 		fmt.Print(chunk.Chunk.Delta.Content)
 	}
 	fmt.Println()
+}
+
+// ---------- privacy ----------
+
+func cmdPrivacy(args []string) {
+	fs := flag.NewFlagSet("privacy", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	endpoint := os.Getenv("AOEO_PRIVACY_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "http://localhost:8080"
+	}
+	enabled := os.Getenv("AOEO_PRIVACY_ENABLED") == "true"
+
+	fmt.Println("AoEo Privacy Filter")
+	fmt.Println("===================")
+	fmt.Printf("Enabled:     %v\n", enabled)
+	fmt.Printf("Endpoint:    %s\n", endpoint)
+	fmt.Printf("Policy:      %s\n", os.Getenv("AOEO_PRIVACY_POLICY"))
+	fmt.Printf("FailOpen:    %v\n", os.Getenv("AOEO_PRIVACY_FAILOPEN") == "true")
+	fmt.Println()
+
+	if !enabled {
+		fmt.Println("Privacy filter is disabled. Set AOEO_PRIVACY_ENABLED=true to enable.")
+		return
+	}
+
+	gw, err := privacy.NewGateway(privacy.GatewayConfig{ModelEndpoint: endpoint})
+	if err != nil {
+		fmt.Printf("Gateway init: %v\n", err)
+		return
+	}
+	defer gw.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if gw.HealthCheck(ctx) {
+		fmt.Println("Sidecar:     OK")
+	} else {
+		fmt.Println("Sidecar:     UNREACHABLE")
+	}
+
+	stats := gw.Stats()
+	fmt.Printf("Pseudonymized: %d\n", stats.RequestsPseudonymized)
+	fmt.Printf("Restored:      %d\n", stats.RequestsRestored)
+	fmt.Printf("Failed:        %d\n", stats.RequestsFailed)
+	fmt.Printf("Spans detected: %d\n", stats.SpansDetected)
 }

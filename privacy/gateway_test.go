@@ -5,24 +5,23 @@ import (
 	"testing"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
-	"github.com/JishiTeam-J1wa/AoEo/storage"
+	"github.com/JishiTeam-J1wa/AoEo/privacy/store"
 )
 
 func TestGateway_BeforeRequest(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
 
 	gen := NewFakeGenerator(42)
-	detector := &modelDetectAdapter{md: &mockDetector{
+	detector := &mockDetector{
 		spans: []Span{
 			{Label: EntityIP, Original: "192.168.1.1", Score: 0.99},
 		},
-	}}
+	}
 
 	gw, err := NewGateway(GatewayConfig{
-		Storage:       store,
-		Generator:     gen,
-		ModelDetector: detector,
+		Store:     pebbleStore,
+		Generator: gen,
+		Detector:  detector,
 	})
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
@@ -46,20 +45,19 @@ func TestGateway_BeforeRequest(t *testing.T) {
 }
 
 func TestGateway_AfterResponse(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
 
 	gen := NewFakeGenerator(42)
-	detector := &modelDetectAdapter{md: &mockDetector{
+	detector := &mockDetector{
 		spans: []Span{
 			{Label: EntityIP, Original: "192.168.1.1", Score: 0.99},
 		},
-	}}
+	}
 
 	gw, err := NewGateway(GatewayConfig{
-		Storage:       store,
-		Generator:     gen,
-		ModelDetector: detector,
+		Store:     pebbleStore,
+		Generator: gen,
+		Detector:  detector,
 	})
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
@@ -75,7 +73,7 @@ func TestGateway_AfterResponse(t *testing.T) {
 	gw.BeforeRequest(context.Background(), &req)
 
 	// Find the fake IP.
-	entries, _ := store.GetMappings(context.Background(), "default")
+	entries, _ := pebbleStore.GetSession(context.Background(), "default")
 	if len(entries) == 0 {
 		t.Fatal("no mappings")
 	}
@@ -100,10 +98,9 @@ func TestGateway_AfterResponse(t *testing.T) {
 }
 
 func TestGateway_ToInterceptor(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
 
-	gw, _ := NewGateway(GatewayConfig{Storage: store})
+	gw, _ := NewGateway(GatewayConfig{Store: pebbleStore})
 	defer gw.Close()
 
 	ic := gw.ToInterceptor()
@@ -122,10 +119,9 @@ func TestGateway_ToInterceptor(t *testing.T) {
 }
 
 func TestGateway_NoDetection(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
 
-	gw, _ := NewGateway(GatewayConfig{Storage: store})
+	gw, _ := NewGateway(GatewayConfig{Store: pebbleStore})
 	defer gw.Close()
 
 	req := &core.ChatCompletionRequest{

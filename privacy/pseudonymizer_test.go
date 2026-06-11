@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
-	"github.com/JishiTeam-J1wa/AoEo/storage"
+	"github.com/JishiTeam-J1wa/AoEo/privacy/store"
 )
 
 // mockDetector simulates the Privacy Filter model for testing.
@@ -16,6 +16,14 @@ type mockDetector struct {
 
 func (m *mockDetector) Detect(text string) DetectResult {
 	return DetectResult{Spans: m.spans}
+}
+
+func (m *mockDetector) DetectBatch(texts []string) []DetectResult {
+	result := make([]DetectResult, len(texts))
+	for i := range texts {
+		result[i] = m.Detect(texts[i])
+	}
+	return result
 }
 
 // modelDetectAdapter adapts mockDetector to ModelDetector interface.
@@ -28,8 +36,8 @@ func (a *modelDetectAdapter) Detect(text string) []Span {
 }
 
 func TestPseudonymizer_BasicPseudonymize(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
+	defer pebbleStore.Close()
 
 	gen := NewFakeGenerator(42)
 	detector := &mockDetector{
@@ -40,7 +48,7 @@ func TestPseudonymizer_BasicPseudonymize(t *testing.T) {
 		},
 	}
 
-	ps := NewPseudonymizer(store, gen, detector)
+	ps := NewPseudonymizer(pebbleStore, gen, detector)
 
 	req := &core.ChatCompletionRequest{
 		Messages: []core.Message{
@@ -76,8 +84,8 @@ func TestPseudonymizer_BasicPseudonymize(t *testing.T) {
 }
 
 func TestPseudonymizer_ConsistentMapping(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
+	defer pebbleStore.Close()
 
 	gen := NewFakeGenerator(42)
 	detector := &mockDetector{
@@ -86,7 +94,7 @@ func TestPseudonymizer_ConsistentMapping(t *testing.T) {
 		},
 	}
 
-	ps := NewPseudonymizer(store, gen, detector)
+	ps := NewPseudonymizer(pebbleStore, gen, detector)
 	ctx := context.Background()
 
 	req1 := &core.ChatCompletionRequest{
@@ -111,15 +119,15 @@ func TestPseudonymizer_ConsistentMapping(t *testing.T) {
 
 	// Extract the fake IP from both and compare.
 	// The fake IP should be identical because we reused the mapping.
-	entries, _ := store.GetMappings(ctx, "sess-1")
+	entries, _ := pebbleStore.GetSession(ctx, "sess-1")
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 mapping, got %d", len(entries))
 	}
 }
 
 func TestPseudonymizer_RestoreResponse(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
+	defer pebbleStore.Close()
 
 	gen := NewFakeGenerator(42)
 	detector := &mockDetector{
@@ -128,7 +136,7 @@ func TestPseudonymizer_RestoreResponse(t *testing.T) {
 		},
 	}
 
-	ps := NewPseudonymizer(store, gen, detector)
+	ps := NewPseudonymizer(pebbleStore, gen, detector)
 	ctx := context.Background()
 
 	// First pseudonymize to create the mapping.
@@ -138,7 +146,7 @@ func TestPseudonymizer_RestoreResponse(t *testing.T) {
 	ps.PseudonymizeRequest(ctx, "sess-1", req)
 
 	// Find the fake IP.
-	entries, _ := store.GetMappings(ctx, "sess-1")
+	entries, _ := pebbleStore.GetSession(ctx, "sess-1")
 	if len(entries) == 0 {
 		t.Fatal("no mappings")
 	}
@@ -166,13 +174,13 @@ func TestPseudonymizer_RestoreResponse(t *testing.T) {
 }
 
 func TestPseudonymizer_NoSensitiveData(t *testing.T) {
-	store, _ := storage.NewSQLite(":memory:")
-	defer store.Close()
+	pebbleStore, _ := store.OpenPebble(t.TempDir() + "/privacy")
+	defer pebbleStore.Close()
 
 	gen := NewFakeGenerator(42)
 	detector := &mockDetector{spans: nil}
 
-	ps := NewPseudonymizer(store, gen, detector)
+	ps := NewPseudonymizer(pebbleStore, gen, detector)
 	ctx := context.Background()
 
 	req := &core.ChatCompletionRequest{

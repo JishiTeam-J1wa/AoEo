@@ -97,17 +97,18 @@ func main() {
 }
 ```
 
-### 带隐私网关的调用（3 行接入）
+### 带隐私网关的调用（1 行接入）
 
-```go
-rules, _ := privacy.LoadRuleDatabase("privacy_rules.yaml")
-gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
-    Rules: privacy.NewRuleEngine(rules), Policy: privacy.ActionPseudonymize,
-})
-client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gateway.ToInterceptor()))
+```bash
+export AOEO_PRIVACY_ENABLED=true
+export AOEO_PRIVACY_ENDPOINT=http://localhost:8080
 ```
 
-敏感信息（手机号、身份证号、内网 IP）出网前自动替换为伪造值，AI 响应返回时自动还原。
+```go
+client, _ := aoeo.NewClient(cfg, privacy.WithPrivacyFilter())
+```
+
+敏感信息（手机号、身份证号、内网 IP）出网前自动替换为伪造值，AI 响应返回时自动还原。支持多台 Sidecar 横向扩容 + 智能路由，见 [PRIVACY_GATEWAY.md](./PRIVACY_GATEWAY.md)。
 
 ---
 
@@ -419,25 +420,42 @@ cfg := aoeo.Config{
 
 ### 16. 隐私安全网关
 
-AoEo 内置可逆隐私网关，确保敏感信息（PII、内网 IP、内部域名、身份证号等）在出网前被替换为伪造值，AI 响应返回时自动还原：
+AoEo 内置可逆隐私网关，确保敏感信息（PII、内网 IP、内部域名、身份证号等）在出网前被替换为伪造值，AI 响应返回时自动还原。支持 **批量检测**、**多 Sidecar 智能路由**、**HTTP/2**、**连接预热**。
 
-```go
-// 加载本地规则库
-rules, _ := privacy.LoadRuleDatabase("privacy_rules.yaml")
+#### 一行接入（环境变量自动配置）
 
-// 创建隐私网关
-gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
-    Rules:  privacy.NewRuleEngine(rules),
-    Policy: privacy.ActionPseudonymize,
-})
-
-// 接入 AoEo
-client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gateway.ToInterceptor()))
+```bash
+export AOEO_PRIVACY_ENABLED=true
+export AOEO_PRIVACY_ENDPOINT=http://localhost:8080
 ```
 
-**双层检测**：
-- **本地规则引擎**：IP 黑白名单 / CIDR 网段、域名过滤、关键词、正则匹配
-- **Privacy Filter 模型**：OpenAI Privacy Filter 本地模型检测姓名、电话、身份证、密钥等 PII
+```go
+import "github.com/JishiTeam-J1wa/AoEo/privacy"
+
+client, _ := aoeo.NewClient(cfg, privacy.WithPrivacyFilter())
+```
+
+#### 多实例 + 智能路由（LeastLatency）
+
+```go
+gw, _ := privacy.NewGateway(privacy.GatewayConfig{
+    // 逗号分隔多地址，Go 端自动做负载均衡
+    ModelEndpoint: "http://sidecar-1:8080,http://sidecar-2:8080,http://sidecar-3:8080",
+    LBStrategy:    model.LeastLatency, // 自动路由到延迟最低的节点
+    Policy:        privacy.ActionPseudonymize,
+    FailOpen:      true, // sidecar 全部故障时透传请求
+})
+client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gw.ToInterceptor()))
+```
+
+**批量检测**：请求含多条 message 时，自动合并为一次 `DetectBatch` 调用，N 条降为 1 次 HTTP 往返。
+
+**负载均衡策略**：
+| 策略 | 行为 | 适用场景 |
+|---|---|---|
+| `RoundRobin` | 轮询分发 | 均匀负载 |
+| `Random` | 随机分发 | 简单分散 |
+| `LeastLatency` | EWMA 延迟加权，自动路由到最快节点 | **生产推荐** |
 
 **处理策略**：
 | 策略 | 行为 | 适用场景 |
@@ -517,11 +535,10 @@ store, _ := storage.NewPostgres("postgres://user:pass@localhost:5432/aoeo?sslmod
 history := engine.NewHistory(100)
 history.SetStorage(store)
 
-// 接入 Privacy Gateway（映射表持久化）
+// 接入 Privacy Gateway（Pebble KV 映射表持久化）
 gateway, _ := privacy.NewGateway(privacy.GatewayConfig{
-    Storage: store,
-    Rules:   privacy.NewRuleEngine(rules),
-    Policy:  privacy.ActionPseudonymize,
+    ModelEndpoint: "http://localhost:8080",
+    Policy:        privacy.ActionPseudonymize,
 })
 ```
 
@@ -573,12 +590,18 @@ AoEo/
 │   └── providers.go   # Provider 接口 + BaseProvider + OpenAI + 内置 Provider
 ├── privacy/           # 隐私安全网关
 │   ├── types.go           # 类型定义（EntityType, Span, Mapping）
-│   ├── store.go           # SQLite 映射表存储（兼容层）
+│   ├── detector.go        # 检测器接口（含 DetectBatch）
+│   ├── model_adapter.go   # model.Client → Detector 适配器
 │   ├── generator.go       # 伪造数据生成器
-│   ├── detector.go        # 检测器接口
-│   ├── rules.go           # 本地规则引擎（IP/域名/关键词/正则）
-│   ├── pseudonymizer.go   # 核心伪匿名化器（检测→替换→回溯）
-│   └── gateway.go         # AoEo Interceptor 集成
+│   ├── pseudonymizer.go   # 核心伪匿名化器（批量检测→替换→回溯）
+│   ├── gateway.go         # AoEo Interceptor 集成
+│   ├── option.go          # WithPrivacyFilter() / WithPrivacyModel()
+│   ├── store/             # Pebble KV 映射存储
+│   │   └── pebble.go
+│   └── model/             # Sidecar HTTP 客户端
+│       ├── client.go      # Client 接口（Detect / DetectBatch / HealthCheck）
+│       ├── http.go        # HTTP/JSON 客户端（HTTP/2 + 连接池 + 批量）
+│       └── loadbalancer.go # 多后端负载均衡（LeastLatency + 健康检查 + 预热）
 ├── storage/           # 持久化存储后端（SQLite / MySQL / Postgres）
 │   ├── base.go            # 公共 SQL CRUD 逻辑
 │   ├── sqlite.go          # SQLite 后端（纯 Go，零 CGO）

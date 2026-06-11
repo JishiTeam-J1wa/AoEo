@@ -85,17 +85,6 @@ type Span struct {
 	Original string
 }
 
-// RuleHit represents a match from the local rule database.
-type RuleHit struct {
-	Type        string    // "ip" | "domain" | "keyword" | "regex"
-	Matched     string    // the matched text
-	RuleID      string
-	Category    string
-	Severity    Severity
-	Action      Action
-	Description string
-}
-
 // MappingEntry stores the reversible original-to-fake mapping.
 type MappingEntry struct {
 	ID        int64
@@ -106,18 +95,16 @@ type MappingEntry struct {
 	CreatedAt time.Time
 }
 
-// DetectResult aggregates detections from both the model and the rule engine.
+// DetectResult aggregates detections from the AI privacy filter model.
 type DetectResult struct {
-	Spans    []Span
-	RuleHits []RuleHit
+	Spans []Span
 }
 
 // PrivacyViolationError is returned when sensitive data is detected and the
 // configured policy is to block the request.
 type PrivacyViolationError struct {
-	Layer   string    // "rule_engine" | "privacy_filter"
-	Hits    []RuleHit // rule engine hits (if any)
-	Spans   []Span    // model detections (if any)
+	Layer   string // "privacy_filter"
+	Spans   []Span // model detections (if any)
 	Message string
 }
 
