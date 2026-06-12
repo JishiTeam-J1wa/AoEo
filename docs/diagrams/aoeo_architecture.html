@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AoEo System Architecture</title>
+<style>
+:root {
+  --c-bg: #f8fafc;
+  --c-canvas: #ffffff;
+  --c-border: #cbd5e1;
+  --c-text-main: #0f172a;
+  --c-text-sub: #64748b;
+  --c-accent: #1e293b;
+  --c-red: #dc2626;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', Monaco, Consolas, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--c-bg); font-family: var(--font-ui); color: var(--c-text-main); padding: 32px; }
+
+.diagram-canvas {
+  background: var(--c-canvas);
+  border: 2px solid var(--c-border);
+  padding: 32px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.diagram-header {
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.diagram-title { font-size: 22px; font-weight: 600; }
+.diagram-subtitle {
+  font-size: 11px; font-weight: 500; color: var(--c-text-sub);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;
+}
+.diagram-meta {
+  font-size: 11px; font-family: var(--font-mono); color: var(--c-text-sub);
+  text-align: right;
+}
+
+/* Layers */
+.layer {
+  border: 1px solid var(--c-border);
+  margin-bottom: 16px;
+  position: relative;
+}
+.layer:last-child { margin-bottom: 0; }
+.layer-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--c-border);
+  background: #f9fafb;
+}
+.layer-num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--c-accent);
+  color: #fff;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.layer-name {
+  font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.layer-pkg {
+  font-family: var(--font-mono);
+  font-size: 11px; color: var(--c-text-sub);
+  margin-left: auto;
+}
+.layer-body {
+  padding: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* Nodes */
+.node {
+  background: var(--c-canvas);
+  border: 1px solid var(--c-border);
+  padding: 10px 14px;
+  min-width: 140px;
+  flex: 1;
+}
+.node-title {
+  font-size: 12px; font-weight: 600;
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.node-desc {
+  font-size: 11px; color: var(--c-text-sub);
+  line-height: 1.5;
+}
+.node-file {
+  font-family: var(--font-mono);
+  font-size: 10px; color: var(--c-text-sub);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--c-border);
+}
+
+/* Badge */
+.badge {
+  display: inline-block;
+  font-size: 9px; font-family: var(--font-mono);
+  padding: 1px 5px;
+  border: 1px solid var(--c-text-main);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  vertical-align: middle;
+}
+.badge--filled {
+  background: var(--c-text-main); color: var(--c-canvas);
+}
+.badge--red {
+  border-color: var(--c-red); color: var(--c-red);
+}
+.badge--accent {
+  border-color: var(--c-accent); background: var(--c-accent); color: #fff;
+}
+
+/* Connectors */
+.connector-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+.connector-arrow {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--c-text-sub);
+  letter-spacing: 2px;
+}
+
+/* Info Grid */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--c-border);
+}
+.info-cell {
+  border: 1px solid var(--c-border);
+  padding: 10px 12px;
+}
+.info-label {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.3px;
+  color: var(--c-text-sub);
+  margin-bottom: 4px;
+}
+.info-value {
+  font-family: var(--font-mono);
+  font-size: 13px; font-weight: 600;
+}
+.info-sub {
+  font-size: 10px; color: var(--c-text-sub);
+  margin-top: 2px;
+}
+
+/* Footer */
+.diagram-footer {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px; color: var(--c-text-sub);
+  font-family: var(--font-mono);
+}
+
+/* Section separator */
+.section-label {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--c-text-sub);
+  margin: 20px 0 8px 0;
+}
+
+/* Wide node */
+.node--wide { flex: 1 1 100%; }
+.node--half { flex: 1 1 calc(50% - 6px); }
+.node--third { flex: 1 1 calc(33% - 8px); }
+
+/* Sub-modules inside a node */
+.sub-modules {
+  display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px;
+}
+.sub-mod {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 4px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+}
+
+/* Provider table */
+.provider-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 8px;
+}
+.provider-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--c-text-sub);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--c-border);
+}
+.provider-table td {
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-bottom: 1px dashed #f1f5f9;
+}
+</style>
+</head>
+<body>
+<div class="diagram-canvas">
+
+  <!-- Header -->
+  <div class="diagram-header">
+    <div>
+      <h1 class="diagram-title">AoEo -- 系统全局架构</h1>
+      <p class="diagram-subtitle">MULTI-PROVIDER AI API GATEWAY SDK &middot; 6-LAYER ARCHITECTURE</p>
+    </div>
+    <div class="diagram-meta">
+      github.com/JishiTeam-J1wa/AoEo<br>
+      Go 1.25 &middot; MIT License<br>
+      76 Go Files &middot; ~10,700 Lines
+    </div>
+  </div>
+
+  <!-- Layer 1: Client Facade -->
+  <div class="layer">
+    <div class="layer-header">
+      <div class="layer-num">1</div>
+      <div class="layer-name">Client Facade</div>
+      <div class="layer-pkg">package aoeo &middot; client.go / options.go</div>
+    </div>
+    <div class="layer-body">
+      <div class="node node--half">
+        <div class="node-title">
+          Client
+          <span class="badge badge--filled">ENTRY POINT</span>
+        </div>
+        <div class="node-desc">
+          高级 SDK 入口。封装 engine.Scheduler + core.EventEmitter，提供 RWMutex 线程安全。
+        </div>
+        <div class="sub-modules">
+          <span class="sub-mod">NewClient()</span>
+          <span class="sub-mod">NewClientWithProviders()</span>
+          <span class="sub-mod">ChatComplete()</span>
+          <span class="sub-mod">ChatCompleteWithFallback()</span>
+          <span class="sub-mod">ChatCompleteDual()</span>
+          <span class="sub-mod">ChatCompleteStream()</span>
+          <span class="sub-mod">Audit()</span>
+        </div>
+        <div class="node-file">47 type aliases re-exported &middot; 312 lines</div>
+      </div>
+      <div class="node node--half">
+        <div class="node-title">
+          Request Options
+          <span class="badge">FUNCTIONAL</span>
+        </div>
+        <div class="node-desc">
+          func(*ChatCompletionRequest) 模式，链式构建请求参数。
+        </div>
+        <div class="sub-modules">
+          <span class="sub-mod">WithSystemPrompt</span>
+          <span class="sub-mod">WithTemperature</span>
+          <span class="sub-mod">WithMaxTokens</span>
+          <span class="sub-mod">WithModel</span>
+          <span class="sub-mod">WithTools</span>
+          <span class="sub-mod">WithJSONResponse</span>
+          <span class="sub-mod">BuildRequest()</span>
+        </div>
+        <div class="node-file">13 option functions &middot; 125 lines</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="connector-row"><span class="connector-arrow">&darr; &darr; &darr;</span></div>
+
+  <!-- Layer 2: Scheduler -->
+  <div class="layer">
+    <div class="layer-header">
+      <div class="layer-num">2</div>
+      <div class="layer-name">Scheduler Engine</div>
+      <div class="layer-pkg">internal/engine/ &middot; 971 lines (scheduler.go)</div>
+    </div>
+    <div class="layer-body">
+      <div class="node node--third">
+        <div class="node-title">
+          Scheduler
+          <span class="badge badge--accent">CORE</span>
+        </div>
+        <div class="node-desc">
+          核心调度引擎。管理 Provider 生命周期、并发控制（Adaptive Semaphore）、熔断器、重试（指数退避+30%抖动）、Prompt 注入、拦截器链、路由选择、健康检查。
+        </div>
+        <div class="sub-modules">
+          <span class="sub-mod">ChatComplete</span>
+          <span class="sub-mod">Fallback</span>
+          <span class="sub-mod">Dual</span>
+          <span class="sub-mod">Stream</span>
+          <span class="sub-mod">Audit</span>
+        </div>
+      </div>
+      <div class="node node--third">
+        <div class="node-title">
+          History &amp; Audit
+        </div>
+        <div class="node-desc">
+          Ring Buffer（100条）+ 可选 Storage 持久化。异步写入（3s超时）。Audit 双 Provider 对比 + Consensus 判定。
+        </div>
+        <div class="sub-modules">
+          <span class="sub-mod">history.go (294L)</span>
+          <span class="sub-mod">audit.go (125L)</span>
+          <span class="sub-mod">result.go (174L)</span>
+        </div>
+      </div>
+      <div class="node node--third">
+        <div class="node-title">
+          Stream &amp; Semaphore
+        </div>
+        <div class="node-desc">
+          SSE 流式处理，16-buffer channel 解耦。Adaptive Semaphore: CAS 快速路径 + FIFO 等待队列，动态容量调节。
+        </div>
+        <div class="sub-modules">
+          <span class="sub-mod">stream.go (142L)</span>
+          <span class="sub-mod">semaphore.go (119L)</span>
+          <span class="sub-mod">retry_impl.go (71L)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="connector-row"><span class="connector-arrow">&darr; &darr; &darr;</span></div>
+
+  <!-- Layer 3: Providers -->
+  <div class="layer">
+    <div class="layer-header">
+      <div class="layer-num">3</div>
+      <div class="layer-name">Provider Layer</div>
+      <div class="layer-pkg">providers/ &middot; providers.go (845 lines)</div>
+    </div>
+    <div class="layer-body">
+      <div class="node node--half">
+        <div class="node-title">
+          BaseProvider
+          <span class="badge">ABSTRACT</span>
+        </div>
+        <div class="node-desc">
+          通用 Provider 基础：熔断器（原子 failCount/failUntil）、20 条滑动窗口健康监控、系统提示覆盖、事件发射器。
+        </div>
+        <div class="sub-modules">
+          <span class="sub-mod">RecordFailure</span>
+          <span class="sub-mod">RecordSuccess</span>
+          <span class="sub-mod">IsAvailable</span>
+          <span class="sub-mod">HealthCheck</span>
+          <span class="sub-mod">Health()</span>
+        </div>
+      </div>
+      <div class="node node--half">
+        <div class="node-title">
+          OpenAIProvider
+          <span class="badge badge--filled">ADAPTER</span>
+        </div>
+        <div class="node-desc">
+          通用 OpenAI 兼容适配器。支持 Tool Calling、温度错误自动重试、Proxy/TLS、SSE Streaming。
+        </div>
+        <div class="node-file">sashabaranov/go-openai v1.38.2</div>
+      </div>
+      <div class="node node--wide" style="padding: 8px 14px;">
+        <div class="node-title" style="margin-bottom: 4px;">Built-in Provider Factories</div>
+        <table class="provider-table">
+          <tr><th>Provider</th><th>Factory</th><th>Default Endpoint</th><th>Default Model</th></tr>
+          <tr><td>DeepSeek</td><td>NewDeepSeekProvider()</td><td>api.deepseek.com</td><td>deepseek-v4-pro</td></tr>
+          <tr><td>Kimi</td><td>NewKimiProvider()</td><td>api.moonshot.cn/v1</td><td>kimi-k2.6</td></tr>
+          <tr><td>GLM</td><td>NewGLMProvider()</td><td>open.bigmodel.cn/api/paas/v4</td><td>glm-5.1</td></tr>
+          <tr><td>Qwen</td><td>NewQwenProvider()</td><td>dashscope.aliyuncs.com/compatible-mode/v1</td><td>qwen3.7-max</td></tr>
+          <tr><td>Custom</td><td>CreateProvider()</td><td>(user-specified)</td><td>(any OpenAI-compat)</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="connector-row"><span class="connector-arrow">&darr; &darr; &darr;</span></div>
+
+  <!-- Layer 4: Core Interfaces -->
+  <div class="layer">
+    <div class="layer-header">
+      <div class="layer-num">4</div>
+      <div class="layer-name">Core Interfaces</div>
+      <div class="layer-pkg">core/ &middot; 9 files &middot; ~900 lines</div>
+    </div>
+    <div class="layer-body">
+      <div class="node">
+        <div class="node-title">Router</div>
+        <div class="node-desc">5 策略: Primary, RoundRobin, Random, Weighted (3 sub), SingleProvider</div>
+        <div class="node-file">router.go (257L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">Interceptor</div>
+        <div class="node-desc">4 hooks: Before, After, StreamChunk, StreamDone. Chain 短路执行</div>
+        <div class="node-file">interceptor.go (92L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">Storage</div>
+        <div class="node-desc">全持久化抽象: CallRecord, Audit, PrivacyMapping 三大领域</div>
+        <div class="node-file">storage.go (121L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">EventEmitter</div>
+        <div class="node-desc">6 Topics: provider:fail/open/recover, fallback, audit, dual</div>
+        <div class="node-file">event.go (25L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">Types</div>
+        <div class="node-desc">Request, Response, Message, Choice, Usage, DualResult, AuditResult</div>
+        <div class="node-file">types.go (229L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">Config &amp; Env</div>
+        <div class="node-desc">ProviderConfig + LoadConfigFromEnv() 环境变量自动加载</div>
+        <div class="node-file">config.go (85L) / env.go (200L)</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="connector-row"><span class="connector-arrow">&darr; &darr; &darr;</span></div>
+
+  <!-- Layer 5: Privacy Gateway -->
+  <div class="layer">
+    <div class="layer-header">
+      <div class="layer-num">5</div>
+      <div class="layer-name">Privacy Gateway</div>
+      <div class="layer-pkg">privacy/ &middot; 13 source files &middot; ~2,100 lines</div>
+    </div>
+    <div class="layer-body">
+      <div class="node node--third">
+        <div class="node-title">
+          Gateway
+          <span class="badge badge--red">PII</span>
+        </div>
+        <div class="node-desc">
+          隐私网关。BeforeRequest 伪匿名化 &rarr; AfterResponse 还原。支持流式 chunk 级还原。ToInterceptor() 无缝接入拦截器链。
+        </div>
+        <div class="node-file">gateway.go (320L)</div>
+      </div>
+      <div class="node node--third">
+        <div class="node-title">
+          Pseudonymizer
+        </div>
+        <div class="node-desc">
+          Detect &rarr; Sort(desc) &rarr; Replace &rarr; Collision Check。模糊还原（标点边界匹配）+ 泄露检测扫描。
+        </div>
+        <div class="node-file">pseudonymizer.go (286L)</div>
+      </div>
+      <div class="node node--third">
+        <div class="node-title">
+          OPF Model Client
+        </div>
+        <div class="node-desc">
+          HTTPClient + LoadBalancedClient。3 策略 (RR/Random/LeastLatency EWMA)。后台健康检查 + 连接预热。
+        </div>
+        <div class="node-file">model/http.go (367L) + loadbalancer.go (364L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">FakeGenerator</div>
+        <div class="node-desc">10 类型: IP/Domain/Name/Phone/IDCard/Secret/Address/Email/URL/Date</div>
+        <div class="node-file">generator.go (223L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">PebbleStore</div>
+        <div class="node-desc">LSM-Tree KV, 双向映射, 原子 Batch, TTL 清理</div>
+        <div class="node-file">store/pebble.go (202L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">Detector</div>
+        <div class="node-desc">Interface + ModelAdapter (15s/30s timeout)</div>
+        <div class="node-file">detector.go (12L) + adapter (78L)</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="connector-row"><span class="connector-arrow">&darr; &darr; &darr;</span></div>
+
+  <!-- Layer 6: Storage -->
+  <div class="layer">
+    <div class="layer-header">
+      <div class="layer-num">6</div>
+      <div class="layer-name">Storage Layer</div>
+      <div class="layer-pkg">storage/ &middot; 4 files &middot; 431 lines</div>
+    </div>
+    <div class="layer-body">
+      <div class="node">
+        <div class="node-title">SQLite</div>
+        <div class="node-desc">Pure-Go (no CGO) via modernc.org/sqlite</div>
+        <div class="node-file">sqlite.go (29L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">MySQL</div>
+        <div class="node-desc">go-sql-driver/mysql</div>
+        <div class="node-file">mysql.go (29L)</div>
+      </div>
+      <div class="node">
+        <div class="node-title">PostgreSQL</div>
+        <div class="node-desc">lib/pq, $N placeholders</div>
+        <div class="node-file">postgres.go (30L)</div>
+      </div>
+      <div class="node node--wide">
+        <div class="node-title">Shared SQL Base <span class="badge">3 TABLES / 6 INDEXES</span></div>
+        <div class="node-desc">
+          calls (12 cols) + audits (11 cols) + privacy_mappings (6 cols)。统一 SQL 抽象，方言占位符适配。
+        </div>
+        <div class="node-file">base.go (343L)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Info Grid -->
+  <div class="info-grid">
+    <div class="info-cell">
+      <div class="info-label">Go Files</div>
+      <div class="info-value">76</div>
+      <div class="info-sub">38 source + 38 test</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">Total Lines</div>
+      <div class="info-value">~10,700</div>
+      <div class="info-sub">Go source code</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">Direct Deps</div>
+      <div class="info-value">5</div>
+      <div class="info-sub">go-openai, sqlite, mysql, pq, yaml</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">Providers</div>
+      <div class="info-value">4 + N</div>
+      <div class="info-sub">DeepSeek, Kimi, GLM, Qwen + Custom</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">Router Strategies</div>
+      <div class="info-value">5</div>
+      <div class="info-sub">Primary, RR, Random, Weighted, Single</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">PII Entity Types</div>
+      <div class="info-value">10</div>
+      <div class="info-sub">30+ OPF labels normalized</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">Privacy LB</div>
+      <div class="info-value">3 OPF</div>
+      <div class="info-sub">LeastLatency EWMA (a=0.3)</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">Storage Backends</div>
+      <div class="info-value">3 + 1</div>
+      <div class="info-sub">SQLite/MySQL/PG + Pebble KV</div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="diagram-footer">
+    <span>REV 1.0 &middot; 2026-06-12</span>
+    <span>github.com/JishiTeam-J1wa/AoEo</span>
+    <span>FLAT ENGINEERING BLUEPRINT</span>
+  </div>
+
+</div>
+</body>
+</html>

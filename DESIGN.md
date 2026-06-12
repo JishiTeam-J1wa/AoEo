@@ -1,8 +1,10 @@
 # AoEo 聚合调度设计文档
 
-> 文档版本：v1.1
-> 日期：2026-05-29
+> 文档版本：v1.2
+> 日期：2026-06-12
 > 作者：JishiTeam J1wa
+
+> **工程蓝图**：[系统全局架构图](docs/diagrams/aoeo_architecture.html) | [Privacy 模块工程图](docs/diagrams/aoeo_privacy_module.html) | [请求调度全链路图](docs/diagrams/aoeo_request_lifecycle.html)
 
 ---
 
@@ -728,22 +730,25 @@ scheduler := aoeo.NewScheduler(providers...)
 - [x] 补全流式 / buildRecord / Client / Retry / Router / HealthCheck 测试，覆盖率 71.7% → 70.8%
 
 ### Phase 3.6 — 隐私安全网关（已完成）
-- [x] **纯 AI 模型检测**：删除本地规则引擎，完全依赖 HuggingFace NER 模型检测 PII
+- [x] **OPF 模型检测**：基于 [OpenAI Privacy Filter](https://github.com/gh0stkey/opf-privacy-filter) 1.5B 模型检测 PII，30+ 标签归一化为 10 种 EntityType
 - [x] **可逆伪匿名化（Pseudonymization）**：原始值 ↔ 伪造值映射，Pebble KV 持久化
-- [x] **伪造数据生成器**（IP、域名、姓名、电话、身份证号、密钥等）
+- [x] **伪造数据生成器**（IP、域名、姓名、电话、身份证号、密钥等 10 种类型）
 - [x] **AoEo Gateway 集成**（BeforeRequest / AfterResponse / AfterStreamChunk / AfterStreamDone）
 - [x] **会话隔离 + TTL 清理**
-- [x] **Sidecar 微服务化**：FastAPI + HuggingFace，独立部署
-- [x] **FailOpen**：sidecar 故障时可选透传，不阻断业务
+- [x] **Sidecar 微服务化**：FastAPI + httpx 轻量代理（~50MB，替代 ~2GB HuggingFace）
+- [x] **FailOpen**：OPF 故障时可选透传，不阻断业务
 - [x] **全链路日志**：Go 侧（检测/替换/还原/失败）+ Sidecar 侧（spans/latency）
 
-### Phase 3.7 — 隐私网关微服务化优化（已完成）
-- [x] **批量检测 API**：`DetectBatch`，N 条 message 合并为 1 次 HTTP 往返
-- [x] **智能负载均衡（LeastLatency）**：EWMA 延迟 + 加权路由，自动选择最快 Sidecar
-- [x] **HTTP/2 强制启用**：`ForceAttemptHTTP2: true`，连接复用
+### Phase 3.7 — 隐私网关集群部署（已完成）
+- [x] **OPF 集群部署**：3 台 OPF 实例 + Docker Compose 一键部署
+- [x] **Go 直连模式**：`LoadBalancedClient` 直连多台 OPF，无需 Nginx
+- [x] **批量检测 API**：`DetectBatch`，N 条 message 合并为 1 次 HTTP 往返（OPF `/redact/batch`）
+- [x] **智能负载均衡（LeastLatency）**：EWMA 延迟 + 加权路由，自动选择最快 OPF 节点
+- [x] **HTTP/2 强制启用**：连接复用，降低多请求开销
 - [x] **连接预热**：启动时自动预热 TCP / HTTP/2 连接，消除首包延迟
-- [x] **客户端负载均衡**：内置 `LoadBalancedClient`，无需 Nginx 即可多实例部署
 - [x] **健康检查 + 故障剔除/恢复**：每 10 秒自动探测，故障节点自动隔离
+- [x] **nginx-opf 负载均衡**：可选 Nginx 路径（sidecar 向后兼容）
+- [x] **OPF 标签归一化**：`normalizeOPFLabel()` 将 30+ Presidio/OPF 标签映射为 AoEo 标准 EntityType
 
 ### Phase 4 — 生态扩展（已完成）
 - [x] 权重路由（按延迟/成功率加权，`WeightedRouter`）
@@ -756,8 +761,9 @@ scheduler := aoeo.NewScheduler(providers...)
 - [ ] 与 Langfuse / LangSmith 集成
 - [ ] Provider 插件机制（动态加载）
 - [ ] 分布式调度：多节点状态同步
-- [ ] Sidecar 模型热更新：无需重启更换检测模型
-- [ ] 批量检测并行化：Sidecar 端多 GPU 并行 inference
+- [ ] OPF 模型热更新：无需重启更换检测模型
+- [ ] Prometheus metrics exporter
+- [ ] OpenTelemetry tracing integration
 
 ---
 

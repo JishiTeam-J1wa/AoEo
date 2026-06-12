@@ -13,8 +13,8 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/core"
 )
 
-// HTTPClient calls a privacy filter sidecar via HTTP/JSON.
-// Compatible with Luwu's resources/privacy-server/server.py.
+// HTTPClient calls an OpenAI Privacy Filter (OPF) sidecar via HTTP/JSON.
+// It is compatible with the gh0stkey/opf-privacy-filter service.
 type HTTPClient struct {
 	baseURL string
 	client  *http.Client
@@ -25,7 +25,8 @@ type HTTPClient struct {
 // HTTPClientOption configures an HTTPClient.
 type HTTPClientOption func(*HTTPClient)
 
-// WithTimeout sets the per-request timeout (default 5s).
+// WithTimeout sets the per-request timeout (default 10s).
+// OPF inference may be slower than simple regex detection.
 func WithTimeout(d time.Duration) HTTPClientOption {
 	return func(c *HTTPClient) {
 		c.timeout = d
@@ -39,11 +40,11 @@ func WithRetries(n int) HTTPClientOption {
 	}
 }
 
-// NewHTTPClient creates an HTTP client for the privacy filter sidecar.
+// NewHTTPClient creates an HTTP client for the OPF privacy filter sidecar.
 func NewHTTPClient(baseURL string, opts ...HTTPClientOption) *HTTPClient {
 	c := &HTTPClient{
 		baseURL: baseURL,
-		timeout: 5 * time.Second,
+		timeout: 10 * time.Second,
 		retries: 2,
 	}
 	for _, opt := range opts {
@@ -58,7 +59,7 @@ func NewHTTPClient(baseURL string, opts ...HTTPClientOption) *HTTPClient {
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
+			Timeout:   3 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
@@ -70,33 +71,52 @@ func NewHTTPClient(baseURL string, opts ...HTTPClientOption) *HTTPClient {
 	return c
 }
 
-type detectRequest struct {
+// ---------------------------------------------------------------------------
+// OPF API request / response types
+// ---------------------------------------------------------------------------
+
+type opfRedactRequest struct {
 	Text string `json:"text"`
 }
 
-type detectResponse struct {
-	Text  string `json:"text"`
-	Spans []Span `json:"spans"`
-	Error string `json:"error,omitempty"`
+type opfSpan struct {
+	Label       string `json:"label"`
+	Start       int    `json:"start"`
+	End         int    `json:"end"`
+	Text        string `json:"text"`
+	Placeholder string `json:"placeholder"`
 }
 
-type batchDetectRequest struct {
+type opfRedactResponse struct {
+	SchemaVersion int       `json:"schema_version"`
+	Text          string    `json:"text"`
+	RedactedText  string    `json:"redacted_text"`
+	DetectedSpans []opfSpan `json:"detected_spans"`
+	Summary       map[string]any `json:"summary"`
+	Warning       *string   `json:"warning"`
+	LatencyMs     float64   `json:"latency_ms"`
+}
+
+type opfBatchRedactRequest struct {
 	Texts []string `json:"texts"`
 }
 
-type batchDetectResult struct {
-	Spans []Span `json:"spans"`
+type opfBatchRedactResponse struct {
+	Results        []opfRedactResponse `json:"results"`
+	TotalLatencyMs float64             `json:"total_latency_ms"`
 }
 
-type batchDetectResponse struct {
-	Results []batchDetectResult `json:"results"`
+type opfHealthResponse struct {
+	Status      string `json:"status"`
+	ModelLoaded bool   `json:"model_loaded"`
 }
 
-type healthResponse struct {
-	Status string `json:"status"`
-}
+// ---------------------------------------------------------------------------
+// Detect (single text)
+// ---------------------------------------------------------------------------
 
-// Detect implements Client.
+// Detect implements Client. Sends a single text to the OPF /redact endpoint
+// and returns the detected PII spans.
 func (c *HTTPClient) Detect(ctx context.Context, text string) ([]Span, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.retries; attempt++ {
@@ -114,17 +134,17 @@ func (c *HTTPClient) Detect(ctx context.Context, text string) ([]Span, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("privacy filter detect (retried %d): %w", c.retries, lastErr)
+	return nil, fmt.Errorf("opf privacy filter detect (retried %d): %w", c.retries, lastErr)
 }
 
 func (c *HTTPClient) detectOnce(ctx context.Context, text string) ([]Span, error) {
 	start := time.Now()
-	body, err := json.Marshal(detectRequest{Text: text})
+	body, err := json.Marshal(opfRedactRequest{Text: text})
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/detect", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/redact", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +152,8 @@ func (c *HTTPClient) detectOnce(ctx context.Context, text string) ([]Span, error
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		core.GetLogger().Error("privacy sidecar request failed",
-			"url", c.baseURL+"/detect",
+		core.GetLogger().Error("opf sidecar request failed",
+			"url", c.baseURL+"/redact",
 			"error", err,
 			"latency_ms", time.Since(start).Milliseconds(),
 		)
@@ -147,8 +167,8 @@ func (c *HTTPClient) detectOnce(ctx context.Context, text string) ([]Span, error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		core.GetLogger().Error("privacy sidecar error response",
-			"url", c.baseURL+"/detect",
+		core.GetLogger().Error("opf sidecar error response",
+			"url", c.baseURL+"/redact",
 			"status", resp.StatusCode,
 			"body", string(respBody),
 			"latency_ms", time.Since(start).Milliseconds(),
@@ -156,22 +176,27 @@ func (c *HTTPClient) detectOnce(ctx context.Context, text string) ([]Span, error
 		return nil, fmt.Errorf("status %d, body %s", resp.StatusCode, string(respBody))
 	}
 
-	var dr detectResponse
-	if err := json.Unmarshal(respBody, &dr); err != nil {
+	var or opfRedactResponse
+	if err := json.Unmarshal(respBody, &or); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	if dr.Error != "" {
-		return nil, fmt.Errorf("sidecar error: %s", dr.Error)
-	}
 
-	core.GetLogger().Info("privacy sidecar detect",
-		"spans", len(dr.Spans),
-		"latency_ms", time.Since(start).Milliseconds(),
+	spans := opfSpansToSpans(or.DetectedSpans)
+
+	core.GetLogger().Info("opf sidecar detect",
+		"spans", len(spans),
+		"opf_latency_ms", or.LatencyMs,
+		"total_latency_ms", time.Since(start).Milliseconds(),
 	)
-	return dr.Spans, nil
+	return spans, nil
 }
 
-// DetectBatch implements Client by sending multiple texts in a single request.
+// ---------------------------------------------------------------------------
+// DetectBatch (multiple texts)
+// ---------------------------------------------------------------------------
+
+// DetectBatch implements Client by sending multiple texts to the OPF
+// /redact/batch endpoint in a single request.
 func (c *HTTPClient) DetectBatch(ctx context.Context, texts []string) ([][]Span, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -185,12 +210,12 @@ func (c *HTTPClient) DetectBatch(ctx context.Context, texts []string) ([][]Span,
 	}
 
 	start := time.Now()
-	body, err := json.Marshal(batchDetectRequest{Texts: texts})
+	body, err := json.Marshal(opfBatchRedactRequest{Texts: texts})
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/detect/batch", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/redact/batch", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -198,8 +223,8 @@ func (c *HTTPClient) DetectBatch(ctx context.Context, texts []string) ([][]Span,
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		core.GetLogger().Error("privacy sidecar batch request failed",
-			"url", c.baseURL+"/detect/batch",
+		core.GetLogger().Error("opf sidecar batch request failed",
+			"url", c.baseURL+"/redact/batch",
 			"error", err,
 			"latency_ms", time.Since(start).Milliseconds(),
 		)
@@ -216,34 +241,30 @@ func (c *HTTPClient) DetectBatch(ctx context.Context, texts []string) ([][]Span,
 		return nil, fmt.Errorf("status %d, body %s", resp.StatusCode, string(respBody))
 	}
 
-	var br batchDetectResponse
+	var br opfBatchRedactResponse
 	if err := json.Unmarshal(respBody, &br); err != nil {
 		return nil, fmt.Errorf("decode batch: %w", err)
 	}
 
 	result := make([][]Span, 0, len(br.Results))
 	for _, rs := range br.Results {
-		spans := make([]Span, 0, len(rs.Spans))
-		for _, s := range rs.Spans {
-			spans = append(spans, Span{
-				Label: s.Label,
-				Text:  s.Text,
-				Start: s.Start,
-				End:   s.End,
-				Score: s.Score,
-			})
-		}
+		spans := opfSpansToSpans(rs.DetectedSpans)
 		result = append(result, spans)
 	}
 
-	core.GetLogger().Info("privacy sidecar batch detect",
+	core.GetLogger().Info("opf sidecar batch detect",
 		"texts", len(texts),
-		"latency_ms", time.Since(start).Milliseconds(),
+		"opf_total_latency_ms", br.TotalLatencyMs,
+		"total_latency_ms", time.Since(start).Milliseconds(),
 	)
 	return result, nil
 }
 
-// HealthCheck implements Client.
+// ---------------------------------------------------------------------------
+// HealthCheck
+// ---------------------------------------------------------------------------
+
+// HealthCheck implements Client. It pings the OPF /health endpoint.
 func (c *HTTPClient) HealthCheck(ctx context.Context) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
 	if err != nil {
@@ -260,9 +281,87 @@ func (c *HTTPClient) HealthCheck(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	var hr healthResponse
+	var hr opfHealthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&hr); err != nil {
 		return false, err
 	}
-	return hr.Status == "ok", nil
+	return hr.Status == "ok" && hr.ModelLoaded, nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// opfSpansToSpans converts OPF detected spans to our Span type.
+func opfSpansToSpans(opfSpans []opfSpan) []Span {
+	if len(opfSpans) == 0 {
+		return nil
+	}
+	spans := make([]Span, 0, len(opfSpans))
+	for _, s := range opfSpans {
+		spans = append(spans, Span{
+			Label:       normalizeOPFLabel(s.Label),
+			Text:        s.Text,
+			Start:       s.Start,
+			End:         s.End,
+			Score:       1.0, // OPF does not provide per-span confidence scores
+			Placeholder: s.Placeholder,
+		})
+	}
+	return spans
+}
+
+// normalizeOPFLabel maps OPF model output labels to our entity type names.
+// OPF uses labels like "NAME", "EMAIL_ADDRESS", "PHONE_NUMBER", etc.
+// We normalize them to our EntityType constants: "person", "email", "phone", etc.
+func normalizeOPFLabel(label string) string {
+	if mapped, ok := opfLabelMap[label]; ok {
+		return mapped
+	}
+	// Unknown labels default to "secret" (conservative strategy).
+	return "secret"
+}
+
+// opfLabelMap maps OPF model output labels to AoEo entity types.
+// Covers OPF/Presidio labels and legacy sidecar labels for backward compatibility.
+var opfLabelMap = map[string]string{
+	// Person / Name
+	"NAME":   "person",
+	"PERSON": "person",
+	"PER":    "person",
+	// Email
+	"EMAIL_ADDRESS": "email",
+	"EMAIL":         "email",
+	// Phone
+	"PHONE_NUMBER": "phone",
+	"PHONE":        "phone",
+	"TEL":          "phone",
+	// IP Address
+	"IP_ADDRESS": "ip",
+	"IP":         "ip",
+	// Financial / Secret
+	"CREDIT_CARD":       "secret",
+	"CRYPTO":            "secret",
+	"IBAN_CODE":         "secret",
+	"US_BANK_NUMBER":    "secret",
+	"MEDICAL_LICENSE":   "secret",
+	"SECRET":            "secret",
+	// ID Card / SSN
+	"US_DRIVER_LICENSE": "idcard",
+	"US_SSN":            "idcard",
+	"SSN":               "idcard",
+	"IDCARD":            "idcard",
+	"ID":                "idcard",
+	// URL / Domain
+	"URL":    "url",
+	"DOMAIN": "domain",
+	// Date
+	"DATE_TIME": "date",
+	"DATE":      "date",
+	// Location / Address
+	"LOCATION": "address",
+	"ADDRESS":  "address",
+	"ADDR":     "address",
+	// Other
+	"NRP": "secret",
 }

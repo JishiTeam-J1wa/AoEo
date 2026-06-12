@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AoEo Privacy Module Blueprint</title>
+<style>
+:root {
+  --c-bg: #f8fafc;
+  --c-canvas: #ffffff;
+  --c-border: #cbd5e1;
+  --c-text-main: #0f172a;
+  --c-text-sub: #64748b;
+  --c-accent: #1e293b;
+  --c-red: #dc2626;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', Monaco, Consolas, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--c-bg); font-family: var(--font-ui); color: var(--c-text-main); padding: 32px; }
+
+.diagram-canvas {
+  background: var(--c-canvas);
+  border: 2px solid var(--c-border);
+  padding: 32px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.diagram-header {
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.diagram-title { font-size: 22px; font-weight: 600; }
+.diagram-subtitle {
+  font-size: 11px; font-weight: 500; color: var(--c-text-sub);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;
+}
+.diagram-meta {
+  font-size: 11px; font-family: var(--font-mono); color: var(--c-text-sub);
+  text-align: right;
+}
+
+/* Section */
+.section {
+  margin-bottom: 24px;
+}
+.section:last-child { margin-bottom: 0; }
+.section-title {
+  font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.3px;
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-badge {
+  display: inline-block; font-size: 9px; font-family: var(--font-mono);
+  padding: 1px 5px; background: var(--c-accent); color: #fff;
+  text-transform: uppercase;
+}
+
+/* Pipeline */
+.pipeline {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+.pipeline-step {
+  flex: 1;
+  border: 1px solid var(--c-border);
+  padding: 12px 14px;
+  position: relative;
+  background: var(--c-canvas);
+}
+.pipeline-step + .pipeline-step {
+  border-left: none;
+}
+.pipeline-step::after {
+  content: '';
+  position: absolute;
+  right: -8px; top: 50%;
+  transform: translateY(-50%);
+  width: 0; height: 0;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-left: 8px solid var(--c-border);
+  z-index: 1;
+}
+.pipeline-step:last-child::after { display: none; }
+.step-num {
+  font-family: var(--font-mono);
+  font-size: 9px; font-weight: 700;
+  color: var(--c-text-sub);
+  margin-bottom: 4px;
+}
+.step-title {
+  font-size: 12px; font-weight: 600;
+  margin-bottom: 4px;
+}
+.step-desc {
+  font-size: 10px; color: var(--c-text-sub);
+  line-height: 1.5;
+}
+
+/* Grid layouts */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+
+/* Node */
+.node {
+  border: 1px solid var(--c-border);
+  padding: 12px 14px;
+  background: var(--c-canvas);
+}
+.node-title {
+  font-size: 12px; font-weight: 600;
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.node-desc {
+  font-size: 11px; color: var(--c-text-sub); line-height: 1.5;
+}
+.node-file {
+  font-family: var(--font-mono);
+  font-size: 10px; color: var(--c-text-sub);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--c-border);
+}
+
+/* Badge */
+.badge {
+  display: inline-block; font-size: 9px; font-family: var(--font-mono);
+  padding: 1px 5px; border: 1px solid var(--c-text-main);
+  text-transform: uppercase; vertical-align: middle;
+}
+.badge--filled { background: var(--c-text-main); color: var(--c-canvas); }
+.badge--red { border-color: var(--c-red); color: var(--c-red); }
+.badge--accent { border-color: var(--c-accent); background: var(--c-accent); color: #fff; }
+
+/* Label map table */
+.label-table {
+  width: 100%; border-collapse: collapse; font-size: 10px;
+}
+.label-table th {
+  text-align: left; font-size: 9px; font-weight: 600;
+  text-transform: uppercase; color: var(--c-text-sub);
+  padding: 3px 6px; border-bottom: 1px solid var(--c-border);
+}
+.label-table td {
+  padding: 2px 6px; font-family: var(--font-mono);
+  border-bottom: 1px dashed #f1f5f9;
+}
+.label-table td:first-child { color: var(--c-text-sub); }
+
+/* Env var table */
+.env-table {
+  width: 100%; border-collapse: collapse; font-size: 10px;
+}
+.env-table th {
+  text-align: left; font-size: 9px; font-weight: 600;
+  text-transform: uppercase; color: var(--c-text-sub);
+  padding: 3px 6px; border-bottom: 1px solid var(--c-border);
+}
+.env-table td {
+  padding: 2px 6px; font-family: var(--font-mono);
+  border-bottom: 1px dashed #f1f5f9;
+}
+
+/* Connector */
+.connector-v {
+  display: flex; justify-content: center; padding: 6px 0;
+}
+.connector-v span {
+  font-family: var(--font-mono); font-size: 14px; color: var(--c-text-sub);
+}
+
+/* Key encoding diagram */
+.key-diagram {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 8px 12px;
+  background: #f9fafb;
+  border: 1px dashed var(--c-border);
+  line-height: 1.8;
+}
+.key-diagram .key-part {
+  display: inline-block;
+  padding: 1px 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-canvas);
+  margin: 0 2px;
+}
+.key-diagram .key-sep {
+  color: var(--c-text-sub);
+  margin: 0 1px;
+}
+
+/* Footer */
+.diagram-footer {
+  margin-top: 20px; padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--c-text-sub);
+  font-family: var(--font-mono);
+}
+
+.mono { font-family: var(--font-mono); font-size: 11px; }
+
+.sub-list {
+  margin-top: 4px;
+  display: flex; gap: 4px; flex-wrap: wrap;
+}
+.sub-tag {
+  font-family: var(--font-mono); font-size: 9px;
+  padding: 1px 4px; background: #f1f5f9; border: 1px solid #e2e8f0;
+}
+</style>
+</head>
+<body>
+<div class="diagram-canvas">
+
+  <!-- Header -->
+  <div class="diagram-header">
+    <div>
+      <h1 class="diagram-title">AoEo Privacy Module -- 详细工程图</h1>
+      <p class="diagram-subtitle">PII PSEUDONYMIZATION GATEWAY &middot; OPF DETECTION ENGINE &middot; CLUSTER DEPLOYMENT</p>
+    </div>
+    <div class="diagram-meta">
+      privacy/ &middot; 13 source files<br>
+      ~2,100 Go + 350 Python lines<br>
+      OPF 1.5B &middot; Pebble KV
+    </div>
+  </div>
+
+  <!-- Section 1: Four-Stage Pipeline -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">PIPELINE</span>
+      四阶段隐私处理流水线
+    </div>
+
+    <div class="pipeline">
+      <div class="pipeline-step">
+        <div class="step-num">STAGE 1</div>
+        <div class="step-title">Detect</div>
+        <div class="step-desc">
+          OPF /redact API 检测 PII。<br>
+          Batch 模式: 所有 messages 一次提交。<br>
+          30+ OPF labels &rarr; 10 EntityTypes 归一化。<br>
+          <span class="mono">timeout: 15s (single) / 30s (batch)</span>
+        </div>
+      </div>
+      <div class="pipeline-step">
+        <div class="step-num">STAGE 2</div>
+        <div class="step-title">Pseudonymize</div>
+        <div class="step-desc">
+          按 Span 长度降序排序，避免短串干扰。<br>
+          复用已有映射（同一 session）。<br>
+          碰撞检测: 确保 fake 不与已有值冲突。<br>
+          <span class="mono">Pebble KV 原子双向写入</span>
+        </div>
+      </div>
+      <div class="pipeline-step">
+        <div class="step-num">STAGE 3</div>
+        <div class="step-title">Forward</div>
+        <div class="step-desc">
+          脱敏后的请求发送给 AI Provider。<br>
+          Provider 只看到 fake 数据。<br>
+          原始 PII 不离开网关。<br>
+          <span class="mono">Interceptor BeforeRequest hook</span>
+        </div>
+      </div>
+      <div class="pipeline-step">
+        <div class="step-num">STAGE 4</div>
+        <div class="step-title">Restore</div>
+        <div class="step-desc">
+          响应中 fake &rarr; original 还原。<br>
+          模糊匹配: 处理 AI 添加的标点边界。<br>
+          泄露扫描: 还原后检测残留 fake。<br>
+          <span class="mono">Streaming: chunk 级实时还原</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 2: OPF Detection Engine -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">DETECTION</span>
+      OPF (OpenAI Privacy Filter) 检测引擎
+    </div>
+
+    <div class="grid-2">
+      <div class="node">
+        <div class="node-title">
+          HTTPClient
+          <span class="badge badge--filled">SINGLE</span>
+        </div>
+        <div class="node-desc">
+          POST /redact &rarr; opfRedactResponse { detected_spans }<br>
+          POST /redact/batch &rarr; opfBatchRedactResponse<br>
+          GET /health &rarr; { status, model_loaded }<br><br>
+          连接池: 100 idle, HTTP/2 支持<br>
+          重试: 2 次, 指数退避 (100ms, 200ms)<br>
+          Dialer: 3s timeout, KeepAlive 30s
+        </div>
+        <div class="node-file">privacy/model/http.go &middot; 367 lines</div>
+      </div>
+      <div class="node">
+        <div class="node-title">
+          LoadBalancedClient
+          <span class="badge badge--accent">CLUSTER</span>
+        </div>
+        <div class="node-desc">
+          多 OPF 实例负载均衡。<br>
+          3 策略: RoundRobin / Random / LeastLatency<br>
+          EWMA 延迟追踪 (alpha=0.3)<br>
+          后台健康检查 (默认 10s)<br>
+          连接预热: 启动时 trivial detect 建立 TCP/H2<br>
+          自动故障转移: 跳过不健康后端
+        </div>
+        <div class="node-file">privacy/model/loadbalancer.go &middot; 364 lines</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 3: Label Normalization -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">MAPPING</span>
+      OPF Label &rarr; AoEo EntityType 归一化 (30+ &rarr; 10)
+    </div>
+
+    <div class="grid-2">
+      <div>
+        <table class="label-table">
+          <tr><th>OPF / Presidio Label</th><th>AoEo EntityType</th><th>Fake 示例</th></tr>
+          <tr><td>NAME, PERSON, PER</td><td>person</td><td>张伟 / John Smith</td></tr>
+          <tr><td>EMAIL_ADDRESS, EMAIL</td><td>email</td><td>a3f8@masked.com</td></tr>
+          <tr><td>PHONE_NUMBER, PHONE</td><td>phone</td><td>13800138000</td></tr>
+          <tr><td>IP_ADDRESS, IP</td><td>ip</td><td>10.24.131.5</td></tr>
+          <tr><td>ID_CARD, NRP</td><td>idcard</td><td>110101199001011234</td></tr>
+        </table>
+      </div>
+      <div>
+        <table class="label-table">
+          <tr><th>OPF / Presidio Label</th><th>AoEo EntityType</th><th>Fake 示例</th></tr>
+          <tr><td>LOCATION, ADDRESS, FAC</td><td>address</td><td>北京市朝阳区建国路1号</td></tr>
+          <tr><td>URL, URI</td><td>url</td><td>https://masked.local/path</td></tr>
+          <tr><td>DOMAIN, HOSTNAME</td><td>domain</td><td>sub.masked.local</td></tr>
+          <tr><td>DATE_TIME, DATE, TIME</td><td>date</td><td>1995-07-22</td></tr>
+          <tr><td>CREDIT_CARD, CRYPTO, ...</td><td>secret</td><td>****-****-****-****</td></tr>
+        </table>
+      </div>
+    </div>
+    <div style="margin-top: 8px; font-size: 10px; color: var(--c-text-sub); font-family: var(--font-mono);">
+      normalizeOPFLabel(): 未知标签默认归类为 "secret" &middot; Score 固定为 1.0 (OPF 无逐 span 置信度)
+    </div>
+  </div>
+
+  <!-- Section 4: Fake Generator -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">GENERATOR</span>
+      FakeGenerator -- 10 种实体类型的高保真假值生成
+    </div>
+
+    <div class="grid-4" style="grid-template-columns: repeat(5, 1fr);">
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">IP</div>
+        <div class="node-desc">RFC1918 私有地址<br><span class="mono">10.x / 172.16-31.x / 192.168.x</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Domain</div>
+        <div class="node-desc">保留子域深度<br><span class="mono">*.masked.local</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Person</div>
+        <div class="node-desc">CJK/English 检测<br><span class="mono"> culturally appropriate</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Phone</div>
+        <div class="node-desc">中国 11 位手机格式<br><span class="mono">1XXXXXXXXXX</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">IDCard</div>
+        <div class="node-desc">18 位 + 校验位<br><span class="mono">computeIDCheckDigit()</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Address</div>
+        <div class="node-desc">省市区街道<br><span class="mono">XX市XX区XX路N号</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Email</div>
+        <div class="node-desc">保留 @domain<br><span class="mono">rand@original.domain</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">URL</div>
+        <div class="node-desc">保留 scheme<br><span class="mono">https://host/randpath</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Date</div>
+        <div class="node-desc">随机 1980-2020<br><span class="mono">YYYY-MM-DD</span></div>
+      </div>
+      <div class="node">
+        <div class="node-title" style="font-size: 11px;">Secret</div>
+        <div class="node-desc">保留长度 + 字符分布<br><span class="mono">genericMask()</span></div>
+      </div>
+    </div>
+    <div style="margin-top: 6px; font-size: 10px; color: var(--c-text-sub); font-family: var(--font-mono);">
+      generator.go &middot; 223 lines &middot; Seeded rand.Rand with Mutex &middot; 确定性可复现
+    </div>
+  </div>
+
+  <!-- Section 5: Pebble KV Store -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">STORAGE</span>
+      Pebble KV 双向映射存储
+    </div>
+
+    <div class="grid-2">
+      <div class="node">
+        <div class="node-title">Key Encoding</div>
+        <div class="key-diagram">
+          <strong>Fake &rarr; Original:</strong><br>
+          <span class="key-part">s</span><span class="key-sep">:</span><span class="key-part">sessionID</span><span class="key-sep">:</span><span class="key-part">f</span><span class="key-sep">:</span><span class="key-part">fake_value</span><br><br>
+          <strong>Original &rarr; Fake:</strong><br>
+          <span class="key-part">s</span><span class="key-sep">:</span><span class="key-part">sessionID</span><span class="key-sep">:</span><span class="key-part">o</span><span class="key-sep">:</span><span class="key-part">original_value</span>
+        </div>
+        <div class="node-file">
+          Value: 8-byte BigEndian timestamp prefix + payload<br>
+          Cache: 32MB block, 1MB memtable
+        </div>
+      </div>
+      <div class="node">
+        <div class="node-title">Operations</div>
+        <div class="node-desc">
+          <span class="mono">Set()</span> &mdash; 原子 Batch 双向写入<br>
+          <span class="mono">GetOriginal(session, fake)</span> &rarr; 还原查找<br>
+          <span class="mono">GetFake(session, original)</span> &rarr; 映射复用<br>
+          <span class="mono">GetSession(session)</span> &rarr; Iterator 遍历<br>
+          <span class="mono">DeleteSession()</span> &rarr; DeleteRange<br>
+          <span class="mono">Cleanup(before)</span> &rarr; 全扫描 + Batch delete<br>
+        </div>
+        <div class="node-file">privacy/store/pebble.go &middot; 202 lines &middot; cockroachdb/pebble v1.1.5</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 6: Cluster Deployment -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">CLUSTER</span>
+      3x OPF 实例集群部署 (Docker Compose)
+    </div>
+
+    <div style="display: flex; gap: 12px; align-items: stretch;">
+      <!-- OPF instances -->
+      <div style="flex: 2; display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; gap: 8px;">
+          <div class="node" style="flex:1; text-align: center;">
+            <div class="node-title" style="justify-content: center;">opf-1 <span class="badge badge--red">1.5B</span></div>
+            <div class="mono">:8000</div>
+          </div>
+          <div class="node" style="flex:1; text-align: center;">
+            <div class="node-title" style="justify-content: center;">opf-2 <span class="badge badge--red">1.5B</span></div>
+            <div class="mono">:8000</div>
+          </div>
+          <div class="node" style="flex:1; text-align: center;">
+            <div class="node-title" style="justify-content: center;">opf-3 <span class="badge badge--red">1.5B</span></div>
+            <div class="mono">:8000</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <div class="node" style="flex:1;">
+            <div class="node-title" style="font-size: 11px;">nginx-opf <span class="badge">:9000</span></div>
+            <div class="node-desc">least_conn, keepalive 32<br>OPF 负载均衡 (sidecar 路径)</div>
+          </div>
+          <div class="node" style="flex:1;">
+            <div class="node-title" style="font-size: 11px;">privacy-sidecar <span class="badge">:8080</span></div>
+            <div class="node-desc">FastAPI + httpx proxy<br>/detect &rarr; /redact 向后兼容</div>
+          </div>
+        </div>
+      </div>
+      <!-- Go Gateway -->
+      <div style="flex: 1;">
+        <div class="node" style="height: 100%; display: flex; flex-direction: column; justify-content: center;">
+          <div class="node-title">
+            aoeo-gateway
+            <span class="badge badge--accent">GO SDK</span>
+          </div>
+          <div class="node-desc">
+            <strong>直连模式:</strong><br>
+            <span class="mono" style="word-break: break-all; font-size: 9px;">
+              AOEO_PRIVACY_ENDPOINT=http://opf-1:8000,http://opf-2:8000,http://opf-3:8000
+            </span><br><br>
+            LoadBalancedClient 解析逗号分隔端点，自动创建 3 后端。<br>
+            LeastLatency EWMA 策略 + 10s 健康检查。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 7: Environment Variables -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">CONFIG</span>
+      环境变量配置
+    </div>
+
+    <table class="env-table">
+      <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+      <tr><td>AOEO_PRIVACY_ENABLED</td><td>false</td><td>启用隐私网关</td></tr>
+      <tr><td>AOEO_PRIVACY_ENDPOINT</td><td>http://localhost:8080</td><td>OPF 端点 (逗号分隔 = 集群模式)</td></tr>
+      <tr><td>AOEO_PRIVACY_POLICY</td><td>pseudonymize</td><td>block / mask / pseudonymize / audit</td></tr>
+      <tr><td>AOEO_PRIVACY_FAILOPEN</td><td>false</td><td>检测失败时放行请求</td></tr>
+      <tr><td>AOEO_PRIVACY_LB_STRATEGY</td><td>leastlatency</td><td>roundrobin / random / leastlatency</td></tr>
+    </table>
+  </div>
+
+  <!-- Footer -->
+  <div class="diagram-footer">
+    <span>REV 1.0 &middot; 2026-06-12</span>
+    <span>PRIVACY MODULE DETAILED BLUEPRINT</span>
+    <span>FLAT ENGINEERING BLUEPRINT</span>
+  </div>
+
+</div>
+</body>
+</html>

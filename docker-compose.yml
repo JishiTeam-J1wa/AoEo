@@ -2,68 +2,80 @@ version: "3.8"
 
 services:
   # ---------------------------------------------------------------------------
-  # Privacy Model Cluster (3 replicas)
+  # OpenAI Privacy Filter (OPF) Cluster — 3 instances for parallel PII detection
+  # Go SDK's LoadBalancedClient connects directly to all instances for optimal
+  # performance (health checks, EWMA latency tracking, automatic failover).
   # ---------------------------------------------------------------------------
-  privacy-sidecar-1:
-    build:
-      context: ./cmd/privacy-sidecar
-      dockerfile: Dockerfile
+  opf-1:
+    image: ghcr.io/gh0stkey/opf-privacy-filter:latest
     environment:
-      - MODEL_PATH=/app/models
-      - DEVICE=cpu
-      - PORT=8080
-      - LOG_LEVEL=info
-    volumes:
-      - ./models:/app/models:ro
+      - OPF_DEVICE=cpu
+      - OPF_OUTPUT_MODE=typed
+    networks:
+      - aoeo
+    # GPU acceleration (uncomment if available):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+  opf-2:
+    image: ghcr.io/gh0stkey/opf-privacy-filter:latest
+    environment:
+      - OPF_DEVICE=cpu
+      - OPF_OUTPUT_MODE=typed
     networks:
       - aoeo
 
-  privacy-sidecar-2:
-    build:
-      context: ./cmd/privacy-sidecar
-      dockerfile: Dockerfile
+  opf-3:
+    image: ghcr.io/gh0stkey/opf-privacy-filter:latest
     environment:
-      - MODEL_PATH=/app/models
-      - DEVICE=cpu
-      - PORT=8080
-      - LOG_LEVEL=info
-    volumes:
-      - ./models:/app/models:ro
-    networks:
-      - aoeo
-
-  privacy-sidecar-3:
-    build:
-      context: ./cmd/privacy-sidecar
-      dockerfile: Dockerfile
-    environment:
-      - MODEL_PATH=/app/models
-      - DEVICE=cpu
-      - PORT=8080
-      - LOG_LEVEL=info
-    volumes:
-      - ./models:/app/models:ro
+      - OPF_DEVICE=cpu
+      - OPF_OUTPUT_MODE=typed
     networks:
       - aoeo
 
   # ---------------------------------------------------------------------------
-  # Nginx Load Balancer
+  # Nginx Load Balancer for OPF cluster (optional, for Sidecar backward-compat)
   # ---------------------------------------------------------------------------
-  nginx-lb:
+  nginx-opf:
     image: nginx:alpine
     ports:
-      - "8080:8080"
+      - "9000:9000"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-opf.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - privacy-sidecar-1
-      - privacy-sidecar-2
-      - privacy-sidecar-3
+      - opf-1
+      - opf-2
+      - opf-3
+    networks:
+      - aoeo
+
+  # ---------------------------------------------------------------------------
+  # Privacy Sidecar Proxy (optional, backward-compatible /detect API)
+  # Routes to OPF cluster via Nginx
+  # ---------------------------------------------------------------------------
+  privacy-sidecar:
+    build:
+      context: ./cmd/privacy-sidecar
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - OPF_ENDPOINT=http://nginx-opf:9000
+      - PORT=8080
+      - LOG_LEVEL=info
+      - TIMEOUT=30
+    depends_on:
+      - nginx-opf
     networks:
       - aoeo
 
   # ---------------------------------------------------------------------------
   # AoEo AI Gateway
+  # Go SDK connects DIRECTLY to all OPF instances (LoadBalancedClient).
+  # Uses LeastLatency strategy for optimal routing based on inference speed.
   # ---------------------------------------------------------------------------
   aoeo-gateway:
     build:
@@ -73,11 +85,13 @@ services:
       - "8081:8081"
     environment:
       - AOEO_PRIVACY_ENABLED=true
-      - AOEO_PRIVACY_ENDPOINT=http://nginx-lb:8080
+      - AOEO_PRIVACY_ENDPOINT=http://opf-1:8000,http://opf-2:8000,http://opf-3:8000
       - AOEO_PRIVACY_POLICY=pseudonymize
       - AOEO_PRIVACY_FAILOPEN=false
     depends_on:
-      - nginx-lb
+      - opf-1
+      - opf-2
+      - opf-3
     networks:
       - aoeo
 

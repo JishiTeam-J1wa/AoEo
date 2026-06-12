@@ -12,16 +12,59 @@ import (
 	"time"
 )
 
+// ---------------------------------------------------------------------------
+// Mock helpers — return OPF-format responses
+// ---------------------------------------------------------------------------
+
+func opfDetectHandler(w http.ResponseWriter, r *http.Request, label, text string) {
+	json.NewEncoder(w).Encode(opfRedactResponse{
+		SchemaVersion: 1,
+		Text:          text,
+		RedactedText:  "[REDACTED]",
+		DetectedSpans: []opfSpan{
+			{Label: label, Text: text, Start: 0, End: len(text), Placeholder: "[" + label + "]"},
+		},
+		Summary:   map[string]any{label: 1},
+		LatencyMs: 1.0,
+	})
+}
+
+func opfBatchHandler(w http.ResponseWriter, r *http.Request) {
+	var req opfBatchRedactRequest
+	json.NewDecoder(r.Body).Decode(&req)
+	results := make([]opfRedactResponse, len(req.Texts))
+	for i, text := range req.Texts {
+		results[i] = opfRedactResponse{
+			SchemaVersion: 1,
+			Text:          text,
+			RedactedText:  "[REDACTED]",
+			DetectedSpans: []opfSpan{
+				{Label: "NAME", Text: text, Start: 0, End: len(text), Placeholder: "[NAME]"},
+			},
+			Summary:   map[string]any{"NAME": 1},
+			LatencyMs: 1.0,
+		}
+	}
+	json.NewEncoder(w).Encode(opfBatchRedactResponse{Results: results, TotalLatencyMs: float64(len(req.Texts))})
+}
+
+func opfHealthHandler(w http.ResponseWriter) {
+	json.NewEncoder(w).Encode(opfHealthResponse{Status: "ok", ModelLoaded: true})
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 func TestLoadBalancedClient_RoundRobin(t *testing.T) {
 	var received []string
-	mu := &sync.Mutex{} // actually not needed for this simple test but ok
+	mu := &sync.Mutex{}
 
 	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect" {
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "ip", Text: "10.0.0.1"}}})
+		if r.URL.Path == "/redact" {
+			opfDetectHandler(w, r, "IP_ADDRESS", "10.0.0.1")
 		} else {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+			opfHealthHandler(w)
 		}
 		mu.Lock()
 		received = append(received, "s1")
@@ -30,11 +73,10 @@ func TestLoadBalancedClient_RoundRobin(t *testing.T) {
 	defer s1.Close()
 
 	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect" {
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "ip", Text: "10.0.0.2"}}})
+		if r.URL.Path == "/redact" {
+			opfDetectHandler(w, r, "IP_ADDRESS", "10.0.0.2")
 		} else {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+			opfHealthHandler(w)
 		}
 		mu.Lock()
 		received = append(received, "s2")
@@ -64,19 +106,16 @@ func TestLoadBalancedClient_RoundRobin(t *testing.T) {
 }
 
 func TestLoadBalancedClient_Failover(t *testing.T) {
-	// s1 always fails.
 	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer s1.Close()
 
-	// s2 succeeds.
 	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect" {
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "ip", Text: "10.0.0.1"}}})
+		if r.URL.Path == "/redact" {
+			opfDetectHandler(w, r, "IP_ADDRESS", "10.0.0.1")
 		} else {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+			opfHealthHandler(w)
 		}
 	}))
 	defer s2.Close()
@@ -84,10 +123,8 @@ func TestLoadBalancedClient_Failover(t *testing.T) {
 	lb := NewLoadBalancedClient(s1.URL+","+s2.URL, RoundRobin)
 	defer lb.Close()
 
-	// s1 is marked unhealthy by health check after first failure,
-	// but we force it here for deterministic test.
 	for _, b := range lb.backends {
-		if strings.Contains(b.endpoint, s1.URL[7:]) { // strip http://
+		if strings.Contains(b.endpoint, s1.URL[7:]) {
 			b.healthy.Store(false)
 		}
 	}
@@ -97,7 +134,11 @@ func TestLoadBalancedClient_Failover(t *testing.T) {
 		t.Fatalf("expected failover to s2, got error: %v", err)
 	}
 	if len(spans) != 1 || spans[0].Text != "10.0.0.1" {
-		t.Fatalf("unexpected result: %v", spans)
+		t.Fatalf("unexpected result: %+v", spans)
+	}
+	// Verify label normalization: IP_ADDRESS -> ip
+	if spans[0].Label != "ip" {
+		t.Errorf("expected label 'ip', got '%s'", spans[0].Label)
 	}
 }
 
@@ -132,29 +173,25 @@ func TestLoadBalancedClient_HealthCheckRecovery(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+		opfHealthHandler(w)
 	}))
 	defer srv.Close()
 
-	// Disable auto health checks so we control timing exactly.
 	lb := NewLoadBalancedClientWithOptions(srv.URL, RoundRobin, nil, []LoadBalancedClientOption{
 		WithAutoHealthCheck(false),
 	})
 	defer lb.Close()
 
-	// Initial check (triggered by startHealthChecks) should pass.
 	if !lb.backends[0].healthy.Load() {
 		t.Fatal("expected initially healthy")
 	}
 
-	// Force failure.
 	failures.Store(1)
 	lb.runHealthChecks(false)
 	if lb.backends[0].healthy.Load() {
 		t.Fatal("expected unhealthy after forced failure")
 	}
 
-	// Recover.
 	failures.Store(0)
 	lb.runHealthChecks(false)
 	if !lb.backends[0].healthy.Load() {
@@ -163,28 +200,25 @@ func TestLoadBalancedClient_HealthCheckRecovery(t *testing.T) {
 }
 
 func TestLoadBalancedClient_LeastLatency(t *testing.T) {
-	// s1 is fast, s2 is slow.
 	var s1Calls, s2Calls atomic.Int32
 
 	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s1Calls.Add(1)
-		if r.URL.Path == "/detect" {
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "ip", Text: "10.0.0.1"}}})
+		if r.URL.Path == "/redact" {
+			opfDetectHandler(w, r, "IP_ADDRESS", "10.0.0.1")
 		} else {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+			opfHealthHandler(w)
 		}
 	}))
 	defer s1.Close()
 
 	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s2Calls.Add(1)
-		if r.URL.Path == "/detect" {
+		if r.URL.Path == "/redact" {
 			time.Sleep(50 * time.Millisecond)
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "ip", Text: "10.0.0.2"}}})
+			opfDetectHandler(w, r, "IP_ADDRESS", "10.0.0.2")
 		} else {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+			opfHealthHandler(w)
 		}
 	}))
 	defer s2.Close()
@@ -194,11 +228,9 @@ func TestLoadBalancedClient_LeastLatency(t *testing.T) {
 	})
 	defer lb.Close()
 
-	// Seed EWMA: s1 gets low latency, s2 gets high latency.
 	lb.backends[0].latencyNs.Store(int64(1 * time.Millisecond))
 	lb.backends[1].latencyNs.Store(int64(100 * time.Millisecond))
 
-	// 5 calls should all go to s1 (lowest latency).
 	for i := 0; i < 5; i++ {
 		_, err := lb.Detect(context.Background(), "test")
 		if err != nil {
@@ -216,18 +248,11 @@ func TestLoadBalancedClient_LeastLatency(t *testing.T) {
 
 func TestLoadBalancedClient_DetectBatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect/batch" {
-			var req batchDetectRequest
-			json.NewDecoder(r.Body).Decode(&req)
-			results := make([]batchDetectResult, len(req.Texts))
-			for i := range req.Texts {
-				results[i] = batchDetectResult{Spans: []Span{{Label: "person", Text: req.Texts[i]}}}
-			}
-			json.NewEncoder(w).Encode(batchDetectResponse{Results: results})
+		if r.URL.Path == "/redact/batch" {
+			opfBatchHandler(w, r)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+		opfHealthHandler(w)
 	}))
 	defer srv.Close()
 
@@ -243,40 +268,32 @@ func TestLoadBalancedClient_DetectBatch(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
-	if len(results[0]) != 1 || results[0][0].Text != "Alice" {
-		t.Errorf("unexpected result[0]: %v", results[0])
+	// NAME -> person
+	if len(results[0]) != 1 || results[0][0].Text != "Alice" || results[0][0].Label != "person" {
+		t.Errorf("unexpected result[0]: %+v", results[0])
 	}
 }
 
 func TestLoadBalancedClient_DetectBatch_Failover(t *testing.T) {
-	// s1 fails batch, s2 succeeds.
 	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect/batch" {
+		if r.URL.Path == "/redact/batch" {
 			http.Error(w, "overload", http.StatusServiceUnavailable)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+		opfHealthHandler(w)
 	}))
 	defer s1.Close()
 
 	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect/batch" {
-			var req batchDetectRequest
-			json.NewDecoder(r.Body).Decode(&req)
-			results := make([]batchDetectResult, len(req.Texts))
-			for i := range req.Texts {
-				results[i] = batchDetectResult{Spans: []Span{{Label: "person", Text: req.Texts[i]}}}
-			}
-			json.NewEncoder(w).Encode(batchDetectResponse{Results: results})
+		if r.URL.Path == "/redact/batch" {
+			opfBatchHandler(w, r)
 			return
 		}
-		if r.URL.Path == "/detect" {
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "person", Text: "Alice"}}})
+		if r.URL.Path == "/redact" {
+			opfDetectHandler(w, r, "NAME", "Alice")
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+		opfHealthHandler(w)
 	}))
 	defer s2.Close()
 
@@ -285,7 +302,6 @@ func TestLoadBalancedClient_DetectBatch_Failover(t *testing.T) {
 	})
 	defer lb.Close()
 
-	// Mark s1 unhealthy so s2 is chosen first.
 	lb.backends[0].healthy.Store(false)
 
 	results, err := lb.DetectBatch(context.Background(), []string{"Alice"})
@@ -293,18 +309,17 @@ func TestLoadBalancedClient_DetectBatch_Failover(t *testing.T) {
 		t.Fatalf("expected failover to s2, got error: %v", err)
 	}
 	if len(results) != 1 || len(results[0]) != 1 || results[0][0].Text != "Alice" {
-		t.Fatalf("unexpected result: %v", results)
+		t.Fatalf("unexpected result: %+v", results)
 	}
 }
 
 func TestLoadBalancedClient_StatsLatency(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/detect" {
-			json.NewEncoder(w).Encode(detectResponse{Spans: []Span{{Label: "ip", Text: "10.0.0.1"}}})
+		if r.URL.Path == "/redact" {
+			opfDetectHandler(w, r, "IP_ADDRESS", "10.0.0.1")
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+		opfHealthHandler(w)
 	}))
 	defer srv.Close()
 

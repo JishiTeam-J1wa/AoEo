@@ -1,16 +1,18 @@
 // Package model provides AI model-based PII detection clients.
-// It supports both HTTP/JSON and gRPC transports to a privacy filter sidecar.
+// It supports HTTP/JSON transport to an OpenAI Privacy Filter (OPF) sidecar
+// or compatible proxy service.
 package model
 
 import "context"
 
 // Span is the detection result from the AI model.
 type Span struct {
-	Label string  `json:"label"` // e.g. "person", "phone", "email", "secret"
-	Text  string  `json:"text"`  // detected original text
-	Start int     `json:"start"` // start index in original text
-	End   int     `json:"end"`   // end index in original text
-	Score float64 `json:"score"` // confidence 0.0~1.0
+	Label       string  `json:"label"`       // e.g. "person", "phone", "email", "secret"
+	Text        string  `json:"text"`        // detected original text
+	Start       int     `json:"start"`       // start index in original text
+	End         int     `json:"end"`         // end index in original text
+	Score       float64 `json:"score"`       // confidence 0.0~1.0
+	Placeholder string  `json:"placeholder"` // OPF replacement placeholder, e.g. "[NAME]"
 }
 
 // Client is the interface for AI privacy filter sidecars.

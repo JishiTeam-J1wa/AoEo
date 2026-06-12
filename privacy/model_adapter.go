@@ -2,7 +2,9 @@ package privacy
 
 import (
 	"context"
+	"time"
 
+	"github.com/JishiTeam-J1wa/AoEo/core"
 	"github.com/JishiTeam-J1wa/AoEo/privacy/model"
 )
 
@@ -18,8 +20,12 @@ func newModelDetectorAdapter(client model.Client) Detector {
 
 // Detect implements Detector.
 func (a *modelDetectorAdapter) Detect(text string) DetectResult {
-	spans, err := a.client.Detect(context.Background(), text)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	spans, err := a.client.Detect(ctx, text)
 	if err != nil {
+		core.GetLogger().Warn("privacy model detect failed", "error", err)
 		return DetectResult{}
 	}
 	result := make([]Span, 0, len(spans))
@@ -40,8 +46,13 @@ func (a *modelDetectorAdapter) DetectBatch(texts []string) []DetectResult {
 	if len(texts) == 0 {
 		return nil
 	}
-	results, err := a.client.DetectBatch(context.Background(), texts)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	results, err := a.client.DetectBatch(ctx, texts)
 	if err != nil {
+		core.GetLogger().Warn("privacy model batch detect failed, falling back to individual calls", "error", err)
 		// Fall back to individual Detect calls on error.
 		out := make([]DetectResult, len(texts))
 		for i, t := range texts {

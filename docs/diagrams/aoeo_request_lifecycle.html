@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AoEo Request Lifecycle</title>
+<style>
+:root {
+  --c-bg: #f8fafc;
+  --c-canvas: #ffffff;
+  --c-border: #cbd5e1;
+  --c-text-main: #0f172a;
+  --c-text-sub: #64748b;
+  --c-accent: #1e293b;
+  --c-red: #dc2626;
+  --c-green: #16a34a;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', Monaco, Consolas, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--c-bg); font-family: var(--font-ui); color: var(--c-text-main); padding: 32px; }
+
+.diagram-canvas {
+  background: var(--c-canvas);
+  border: 2px solid var(--c-border);
+  padding: 32px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.diagram-header {
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.diagram-title { font-size: 22px; font-weight: 600; }
+.diagram-subtitle {
+  font-size: 11px; font-weight: 500; color: var(--c-text-sub);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;
+}
+.diagram-meta {
+  font-size: 11px; font-family: var(--font-mono); color: var(--c-text-sub);
+  text-align: right;
+}
+
+/* Section */
+.section { margin-bottom: 28px; }
+.section:last-child { margin-bottom: 0; }
+.section-title {
+  font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.3px;
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 8px;
+  margin-bottom: 14px;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-badge {
+  display: inline-block; font-size: 9px; font-family: var(--font-mono);
+  padding: 1px 5px; background: var(--c-accent); color: #fff;
+  text-transform: uppercase;
+}
+
+/* Badge */
+.badge {
+  display: inline-block; font-size: 9px; font-family: var(--font-mono);
+  padding: 1px 5px; border: 1px solid var(--c-text-main);
+  text-transform: uppercase; vertical-align: middle;
+}
+.badge--filled { background: var(--c-text-main); color: var(--c-canvas); }
+.badge--red { border-color: var(--c-red); color: var(--c-red); }
+.badge--green { border-color: var(--c-green); color: var(--c-green); }
+.badge--accent { border-color: var(--c-accent); background: var(--c-accent); color: #fff; }
+
+.mono { font-family: var(--font-mono); font-size: 11px; }
+
+/* Flow diagram using SVG */
+.flow-container {
+  position: relative;
+  padding: 0;
+}
+
+/* Step rows */
+.step-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: 2px;
+}
+.step-row:last-child { margin-bottom: 0; }
+
+.step-marker {
+  width: 48px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.step-num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--c-text-sub);
+  z-index: 1;
+  background: var(--c-canvas);
+  padding: 2px 0;
+}
+.step-line {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: var(--c-border);
+}
+
+.step-content {
+  flex: 1;
+  border: 1px solid var(--c-border);
+  padding: 10px 14px;
+  background: var(--c-canvas);
+}
+.step-title {
+  font-size: 12px; font-weight: 600;
+  margin-bottom: 4px;
+  display: flex; align-items: center; gap: 6px;
+}
+.step-desc {
+  font-size: 11px; color: var(--c-text-sub); line-height: 1.6;
+}
+.step-code {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--c-text-main);
+  background: #f9fafb;
+  padding: 4px 8px;
+  margin-top: 4px;
+  border: 1px dashed #e2e8f0;
+  display: inline-block;
+}
+
+/* Branch */
+.branch-container {
+  display: flex;
+  gap: 12px;
+  margin-left: 60px;
+  margin-bottom: 2px;
+}
+.branch-box {
+  flex: 1;
+  border: 1px solid var(--c-border);
+  padding: 10px 14px;
+  background: #fafbfc;
+}
+.branch-label {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase;
+  color: var(--c-text-sub);
+  margin-bottom: 4px;
+}
+
+/* Decision diamond */
+.decision-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 2px;
+}
+.diamond {
+  width: 48px; height: 48px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+}
+.diamond-shape {
+  width: 28px; height: 28px;
+  border: 1.5px solid var(--c-text-sub);
+  transform: rotate(45deg);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--c-canvas);
+}
+.diamond-shape span {
+  transform: rotate(-45deg);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--c-text-sub);
+}
+
+/* Grid */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+/* Node */
+.node {
+  border: 1px solid var(--c-border);
+  padding: 12px 14px;
+  background: var(--c-canvas);
+}
+.node-title {
+  font-size: 12px; font-weight: 600;
+  margin-bottom: 4px;
+  display: flex; align-items: center; gap: 6px;
+}
+.node-desc { font-size: 11px; color: var(--c-text-sub); line-height: 1.5; }
+.node-file {
+  font-family: var(--font-mono); font-size: 10px; color: var(--c-text-sub);
+  margin-top: 6px; padding-top: 6px;
+  border-top: 1px dashed var(--c-border);
+}
+
+/* Connector */
+.connector-h {
+  display: flex; justify-content: center; padding: 6px 0;
+}
+.connector-h span {
+  font-family: var(--font-mono); font-size: 12px; color: var(--c-text-sub);
+}
+
+/* Sequence table */
+.seq-table {
+  width: 100%; border-collapse: collapse; font-size: 11px;
+}
+.seq-table th {
+  text-align: left; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; color: var(--c-text-sub);
+  padding: 4px 8px; border-bottom: 1px solid var(--c-border);
+}
+.seq-table td {
+  padding: 4px 8px; border-bottom: 1px dashed #f1f5f9;
+  vertical-align: top;
+}
+.seq-table td:first-child {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--c-text-sub); white-space: nowrap;
+}
+.seq-table td:nth-child(2) {
+  font-family: var(--font-mono); font-weight: 600;
+}
+
+/* Footer */
+.diagram-footer {
+  margin-top: 20px; padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  display: flex; justify-content: space-between;
+  font-size: 10px; color: var(--c-text-sub);
+  font-family: var(--font-mono);
+}
+</style>
+</head>
+<body>
+<div class="diagram-canvas">
+
+  <!-- Header -->
+  <div class="diagram-header">
+    <div>
+      <h1 class="diagram-title">AoEo -- 请求调度与数据流全链路</h1>
+      <p class="diagram-subtitle">REQUEST LIFECYCLE &middot; SCHEDULING &middot; PRIVACY PIPELINE &middot; STREAMING</p>
+    </div>
+    <div class="diagram-meta">
+      internal/engine/scheduler.go (971L)<br>
+      privacy/gateway.go (320L)<br>
+      privacy/pseudonymizer.go (286L)
+    </div>
+  </div>
+
+  <!-- Section 1: Primary Request Flow -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">FLOW 1</span>
+      ChatComplete 主链路 (单 Provider 直调)
+    </div>
+
+    <div class="flow-container">
+      <!-- Step 1 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">01</div></div>
+        <div class="step-content">
+          <div class="step-title">Client.ChatComplete(ctx, req) <span class="badge badge--filled">ENTRY</span></div>
+          <div class="step-desc">
+            Client facade 接收请求，委托给 engine.Scheduler。RWMutex 读锁保护。
+          </div>
+          <div class="step-code">client.go:107 &rarr; scheduler.ChatComplete(ctx, req)</div>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">02</div></div>
+        <div class="step-content">
+          <div class="step-title">InterceptorChain.ApplyBefore(ctx, req)</div>
+          <div class="step-desc">
+            按序执行所有 Interceptor 的 BeforeRequest hook。Privacy Gateway 在此阶段注入: 检测 PII &rarr; 伪匿名化替换 &rarr; Pebble 存储映射。任意 hook 返回 error 则中断链路。
+          </div>
+          <div class="step-code">interceptor.go: chain.ApplyBefore() &rarr; gateway.BeforeRequest() &rarr; pseudonymizer.PseudonymizeRequest()</div>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">03</div></div>
+        <div class="step-content">
+          <div class="step-title">PromptInjector.Inject(provider, model, req)</div>
+          <div class="step-desc">
+            模板匹配 (provider/model/wildcard)，按位置注入: system / prepend_user / append_user。支持 <span class="mono">{{var}}</span> 变量替换。
+          </div>
+          <div class="step-code">prompt.go: PromptInjector.Inject() &rarr; 修改 req.Messages</div>
+        </div>
+      </div>
+
+      <!-- Step 4 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">04</div></div>
+        <div class="step-content">
+          <div class="step-title">Router.Select(ctx, candidates, req) <span class="badge">PROVIDER SELECTION</span></div>
+          <div class="step-desc">
+            路由策略选择目标 Provider: Primary (首个可用) / RoundRobin (原子计数) / Random (确定性 PRNG) / Weighted (健康评分) / SingleProvider (指定名称)。
+          </div>
+          <div class="step-code">router.go: 5 strategies &rarr; 返回选中 Provider 索引</div>
+        </div>
+      </div>
+
+      <!-- Step 5 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">05</div></div>
+        <div class="step-content">
+          <div class="step-title">Semaphore.Acquire(ctx) <span class="badge badge--accent">CONCURRENCY</span></div>
+          <div class="step-desc">
+            Adaptive Semaphore: CAS 快速路径 (无竞争) 或 FIFO 等待队列 (有竞争)。每 Provider MaxConcurrent 限制。
+          </div>
+          <div class="step-code">semaphore.go: Acquire(ctx) &rarr; defer Release()</div>
+        </div>
+      </div>
+
+      <!-- Step 6 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">06</div></div>
+        <div class="step-content">
+          <div class="step-title">Provider.ChatComplete(ctx, req) <span class="badge badge--green">OUTBOUND</span></div>
+          <div class="step-desc">
+            OpenAIProvider 转换: buildOpenAIMessages + buildOpenAITools &rarr; go-openai client.CreateChatCompletion &rarr; buildCoreChoice 转换回 AoEo Response。
+          </div>
+          <div class="step-code">providers.go: 消息/工具格式转换 &rarr; HTTP call &rarr; 响应标准化</div>
+        </div>
+      </div>
+
+      <!-- Step 7 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">07</div></div>
+        <div class="step-content">
+          <div class="step-title">Retry Logic (if error) <span class="badge badge--red">RETRY</span></div>
+          <div class="step-desc">
+            指数退避 + 30% 抖动: baseDelay &times; multiplier^attempt &times; (1 &plusmn; 0.3)。可重试: timeout, 502/503/504, connection refused, rate limit。
+          </div>
+          <div class="step-code">retry_impl.go: DoRetry(ctx, cfg, fn) &rarr; max 2 retries, 500ms base</div>
+        </div>
+      </div>
+
+      <!-- Step 8 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">08</div></div>
+        <div class="step-content">
+          <div class="step-title">InterceptorChain.ApplyAfter(ctx, req, resp, err)</div>
+          <div class="step-desc">
+            AfterResponse hook 逆序执行。Privacy Gateway 在此还原: fake &rarr; original 映射查找 &rarr; 全文替换 &rarr; 泄露扫描。
+          </div>
+          <div class="step-code">gateway.AfterResponse() &rarr; pseudonymizer.RestoreResponse() &rarr; detectLeaks()</div>
+        </div>
+      </div>
+
+      <!-- Step 9 -->
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">09</div></div>
+        <div class="step-content">
+          <div class="step-title">History.Record(callRecord) + EventEmitter.Emit() <span class="badge">RECORD</span></div>
+          <div class="step-desc">
+            Ring Buffer 写入 (100条) + 异步持久化到 Storage (3s超时, 非阻塞)。事件发射: provider:fail/open/recover, fallback 等。Provider 健康滑窗更新 (20条)。
+          </div>
+          <div class="step-code">history.go: Record() &rarr; ring buffer + go storage.RecordCall()</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 2: Fallback Flow -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">FLOW 2</span>
+      ChatCompleteWithFallback -- 降级回退链路
+    </div>
+
+    <div class="flow-container">
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">A1</div></div>
+        <div class="step-content">
+          <div class="step-title">Router.SelectSequence(ctx, candidates, req) <span class="badge">SEQUENCE</span></div>
+          <div class="step-desc">
+            路由器返回有序 Provider 列表 (优先级从高到低)。
+          </div>
+        </div>
+      </div>
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">A2</div></div>
+        <div class="step-content">
+          <div class="step-title">for provider in sequence: try ChatComplete</div>
+          <div class="step-desc">
+            逐一尝试: 成功 &rarr; 返回; 失败 &rarr; RecordFailure + Emit(provider:fail) + 继续下一个。<br>
+            全部失败 &rarr; 返回 ErrAllProvidersFailed。
+          </div>
+          <div class="step-code">scheduler.go: ChatCompleteWithFallback() &rarr; loop SelectSequence</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 3: Dual / Audit Flow -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">FLOW 3</span>
+      ChatCompleteDual &amp; Audit -- 双 Provider 并发对比
+    </div>
+
+    <div class="grid-2" style="margin-left: 60px;">
+      <div class="node">
+        <div class="node-title">Dual Completion</div>
+        <div class="node-desc">
+          并发请求 2 个 Provider (goroutine + WaitGroup)。<br>
+          返回 DualResult { Primary, Secondary, Consensus }。<br>
+          Consensus = normalize(primary.Content) == normalize(secondary.Content)
+        </div>
+        <div class="node-file">scheduler.go: ChatCompleteDual() &middot; 并发 + MergeChoices()</div>
+      </div>
+      <div class="node">
+        <div class="node-title">Audit Mode</div>
+        <div class="node-desc">
+          要求 2+ Providers。Primary + Secondary 分别完成。<br>
+          共识: 合并结果; 分歧: 并列展示 + Emit(audit:disagree)。<br>
+          返回 AuditResult { Primary, Audit, Consensus, Adjusted }
+        </div>
+        <div class="node-file">audit.go: Audit() &middot; result.go: Consensus() + MergeChoices()</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 4: Streaming Flow -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">FLOW 4</span>
+      ChatCompleteStream -- SSE 流式链路
+    </div>
+
+    <div class="flow-container">
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">S1</div></div>
+        <div class="step-content">
+          <div class="step-title">Semaphore.Acquire &rarr; Provider.ChatCompleteStream</div>
+          <div class="step-desc">
+            获取信号量，调用 Provider 的流式接口。Provider 返回 <span class="mono">&lt;-chan StreamCompletionResponse</span>。
+          </div>
+        </div>
+      </div>
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">S2</div></div>
+        <div class="step-content">
+          <div class="step-title">Buffered Wrapper Channel (16)</div>
+          <div class="step-desc">
+            外层创建 16-buffer channel，解耦生产者 (Provider goroutine) 和消费者 (caller)。Producer goroutine 读取内部 channel &rarr; ApplyAfterStreamChunk &rarr; 写入外层 channel。
+          </div>
+        </div>
+      </div>
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">S3</div></div>
+        <div class="step-content">
+          <div class="step-title">Per-Chunk Privacy Restore <span class="badge badge--red">PII</span></div>
+          <div class="step-desc">
+            每个 chunk 的 Delta.Content 通过 restoreStreamChunk: 查找 session 映射 &rarr; fake &rarr; original 替换。流完成后调用 AfterStreamDone。
+          </div>
+          <div class="step-code">pseudonymizer.go: RestoreStreamChunk() &rarr; 逐 chunk 替换</div>
+        </div>
+      </div>
+      <div class="step-row">
+        <div class="step-marker"><div class="step-line"></div><div class="step-num">S4</div></div>
+        <div class="step-content">
+          <div class="step-title">Semaphore.Release &rarr; History.Record</div>
+          <div class="step-desc">
+            消费完毕后释放信号量，记录调用历史。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 5: Privacy Pipeline Detail -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">DETAIL</span>
+      Privacy Pseudonymize / Restore 内部流程
+    </div>
+
+    <div class="grid-2">
+      <div class="node">
+        <div class="node-title">PseudonymizeRequest <span class="badge badge--red">BEFORE</span></div>
+        <div class="node-desc" style="line-height: 1.8;">
+          1. 收集所有 messages 的 content<br>
+          2. DetectBatch(texts) &rarr; OPF 批量检测<br>
+          3. 按 Span 长度 <strong>降序</strong>排序<br>
+          4. 遍历 Spans:<br>
+          &nbsp;&nbsp;a. GetFake(session, original) &rarr; 已有映射?<br>
+          &nbsp;&nbsp;b. 无 &rarr; FakeGenerator.Generate(type, text)<br>
+          &nbsp;&nbsp;c. 碰撞检测: fake 不与其他 original 重叠<br>
+          &nbsp;&nbsp;d. Pebble.Set(session, fake, original, type)<br>
+          &nbsp;&nbsp;e. strings.Replace 替换 content<br>
+          5. 返回修改后的 request + mappings
+        </div>
+      </div>
+      <div class="node">
+        <div class="node-title">RestoreResponse <span class="badge badge--green">AFTER</span></div>
+        <div class="node-desc" style="line-height: 1.8;">
+          1. GetSession(sessionID) &rarr; 获取所有映射<br>
+          2. 遍历 response choices:<br>
+          &nbsp;&nbsp;a. 遍历 mappings (长 fake 优先)<br>
+          &nbsp;&nbsp;b. replaceFake(content, fake, original)<br>
+          &nbsp;&nbsp;c. 模糊匹配: 处理标点边界<br>
+          3. detectLeaks(resp, entries):<br>
+          &nbsp;&nbsp;a. 扫描 content 中残留的 fake 值<br>
+          &nbsp;&nbsp;b. 有泄露 &rarr; 日志 Warn<br>
+          4. 返回还原后的 response
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 6: Provider Circuit Breaker -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">RESILIENCE</span>
+      Provider 熔断器 &amp; 健康监控状态机
+    </div>
+
+    <div style="display: flex; gap: 12px; align-items: stretch; margin-left: 60px;">
+      <div class="node" style="flex: 1; text-align: center;">
+        <div class="node-title" style="justify-content: center;">CLOSED <span class="badge badge--green">HEALTHY</span></div>
+        <div class="node-desc">正常服务中<br>failCount &lt; MaxFailures<br>sliding window 记录延迟/成功率</div>
+      </div>
+      <div style="display: flex; align-items: center; font-family: var(--font-mono); font-size: 11px; color: var(--c-text-sub);">
+        failCount &ge; 3 &rarr;
+      </div>
+      <div class="node" style="flex: 1; text-align: center;">
+        <div class="node-title" style="justify-content: center;">OPEN <span class="badge badge--red">TRIPPED</span></div>
+        <div class="node-desc">熔断器打开<br>failUntil = now + CooldownDuration<br>IsAvailable() = false</div>
+      </div>
+      <div style="display: flex; align-items: center; font-family: var(--font-mono); font-size: 11px; color: var(--c-text-sub);">
+        cooldown 过期 &rarr;
+      </div>
+      <div class="node" style="flex: 1; text-align: center;">
+        <div class="node-title" style="justify-content: center;">HALF-OPEN <span class="badge">PROBE</span></div>
+        <div class="node-desc">下一次请求作为探针<br>成功 &rarr; RecordSuccess &rarr; CLOSED<br>失败 &rarr; 重新 OPEN</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 7: Function call summary -->
+  <div class="section">
+    <div class="section-title">
+      <span class="section-badge">INDEX</span>
+      核心函数调用链索引
+    </div>
+
+    <table class="seq-table">
+      <tr><th>Call Order</th><th>Function</th><th>Location</th><th>Purpose</th></tr>
+      <tr><td>1</td><td>NewClient(cfg, ...opts)</td><td>client.go</td><td>创建 Client + Scheduler + Provider</td></tr>
+      <tr><td>2</td><td>Client.ChatComplete(ctx, req)</td><td>client.go</td><td>SDK 入口，委托 Scheduler</td></tr>
+      <tr><td>3</td><td>Scheduler.ChatComplete(ctx, req)</td><td>scheduler.go</td><td>核心调度逻辑</td></tr>
+      <tr><td>4</td><td>chain.ApplyBefore(ctx, req)</td><td>interceptor.go</td><td>拦截器前置 (含 Privacy)</td></tr>
+      <tr><td>5</td><td>Gateway.BeforeRequest(ctx, req)</td><td>gateway.go</td><td>PII 检测 + 伪匿名化</td></tr>
+      <tr><td>6</td><td>Pseudonymizer.PseudonymizeRequest()</td><td>pseudonymizer.go</td><td>批量检测 + 映射 + 替换</td></tr>
+      <tr><td>7</td><td>LoadBalancedClient.Detect(ctx, text)</td><td>loadbalancer.go</td><td>选择 OPF 实例发送检测</td></tr>
+      <tr><td>8</td><td>HTTPClient.Detect(ctx, text)</td><td>http.go</td><td>POST /redact + label 归一化</td></tr>
+      <tr><td>9</td><td>PromptInjector.Inject()</td><td>prompt.go</td><td>模板注入 system/user prompt</td></tr>
+      <tr><td>10</td><td>Router.Select(ctx, candidates, req)</td><td>router.go</td><td>路由选择 Provider</td></tr>
+      <tr><td>11</td><td>Semaphore.Acquire(ctx)</td><td>semaphore.go</td><td>并发控制</td></tr>
+      <tr><td>12</td><td>Provider.ChatComplete(ctx, req)</td><td>providers.go</td><td>HTTP 调用 AI Provider</td></tr>
+      <tr><td>13</td><td>DoRetry(ctx, cfg, fn)</td><td>retry_impl.go</td><td>失败重试 (指数退避)</td></tr>
+      <tr><td>14</td><td>chain.ApplyAfter(ctx, req, resp, err)</td><td>interceptor.go</td><td>拦截器后置 (含 Restore)</td></tr>
+      <tr><td>15</td><td>Gateway.AfterResponse(ctx, req, resp, err)</td><td>gateway.go</td><td>PII 还原 + 泄露扫描</td></tr>
+      <tr><td>16</td><td>History.Record(callRecord)</td><td>history.go</td><td>记录 + 异步持久化</td></tr>
+    </table>
+  </div>
+
+  <!-- Footer -->
+  <div class="diagram-footer">
+    <span>REV 1.0 &middot; 2026-06-12</span>
+    <span>REQUEST LIFECYCLE &amp; DATA FLOW</span>
+    <span>FLAT ENGINEERING BLUEPRINT</span>
+  </div>
+
+</div>
+</body>
+</html>
