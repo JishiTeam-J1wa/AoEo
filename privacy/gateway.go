@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
@@ -11,64 +12,73 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/privacy/store"
 )
 
-// GatewayConfig configures the privacy gateway.
+// contextKey 是自定义的上下文键类型，避免使用原始字符串作为键导致冲突。
+type contextKey string
+
+const (
+	// sessionContextKey 是存储在 context 中的会话标识符的键名。
+	sessionContextKey contextKey = "privacy_session_id"
+)
+
+// GatewayConfig 配置隐私网关的各项参数。
 type GatewayConfig struct {
-	// Store is the mapping storage backend. If nil, a Pebble in-process store is created.
+	// Store 是映射存储后端。如果为 nil，则创建 Pebble 本地进程存储。
 	Store store.MappingStore
 
-	// Generator produces fake values. If nil, a default generator is used.
+	// Generator 用于生成伪造值。如果为 nil，则使用默认生成器。
 	Generator *FakeGenerator
 
-	// ModelEndpoint is the URL of the AI privacy filter sidecar.
-	// Supports single endpoint or comma-separated endpoints for load balancing.
-	// Example: "http://127.0.0.1:8080"
-	// Example: "http://sidecar-1:8080,http://sidecar-2:8080"
-	// If empty and Detector is nil, no detection is performed.
+	// ModelEndpoint 是 AI 隐私过滤 sidecar 的 URL 地址。
+	// 支持单个端点或逗号分隔的多端点（用于负载均衡）。
+	// 示例: "http://127.0.0.1:8080"
+	// 示例: "http://sidecar-1:8080,http://sidecar-2:8080"
+	// 如果为空且 Detector 也为 nil，则不执行检测。
 	ModelEndpoint string
 
-	// LBStrategy selects the load-balancing strategy when multiple endpoints
-	// are configured. Defaults to RoundRobin if zero.
-	// Available: RoundRobin, Random, LeastLatency.
+	// LBStrategy 选择多端点配置下的负载均衡策略。
+	// 零值默认为 RoundRobin。
+	// 可选值: RoundRobin, Random, LeastLatency。
 	LBStrategy model.Strategy
 
-	// Detector allows direct injection of a Detector for testing or advanced use.
-	// If set, ModelEndpoint and LBStrategy are ignored.
+	// Detector 允许直接注入检测器，用于测试或高级场景。
+	// 设置后将忽略 ModelEndpoint 和 LBStrategy 配置。
 	Detector Detector
 
-	// Policy defines the default action for detected sensitive data.
-	// For the pseudonymization gateway, this is typically ActionPseudonymize.
+	// Policy 定义检测到敏感数据后的默认操作。
+	// 对于匿名化网关，通常设置为 ActionPseudonymize。
 	Policy Action
 
-	// SessionTTL is how long mappings are kept. Zero means no cleanup.
+	// SessionTTL 定义映射的存活时间。零值表示不自动清理。
 	SessionTTL time.Duration
 
-	// FailOpen, when true, passes the request through unchanged if the sidecar
-	// is unreachable or returns an error. When false (default), errors are
-	// propagated and the request is blocked.
+	// FailOpen 为 true 时，如果 sidecar 不可达或返回错误，请求将原样通过。
+	// 为 false（默认值）时，错误会被向上传传播并阻止请求。
 	FailOpen bool
 }
 
-// Gateway is the AoEo privacy interceptor that sits between the user and
-// AI providers. It transparently replaces sensitive data with fakes before
-// sending requests, and restores originals when responses come back.
+// Gateway 是 AoEo 的隐私拦截器，位于用户和 AI 提供商之间。
+// 它在发送请求前将敏感数据透明地替换为伪造值，
+// 并在响应返回时还原为原始值。
 type Gateway struct {
 	pseudonymizer *Pseudonymizer
 	sessionTTL    time.Duration
 	endpoint      string
 	failOpen      bool
 	stats         Stats
-	modelClient   model.Client // underlying model client (for health checks & close)
+	modelClient   model.Client // 底层模型客户端（用于健康检查和关闭）
 }
 
-// Stats holds runtime statistics for the privacy gateway.
+// Stats 保存隐私网关的运行时统计信息。
+// 所有字段使用 atomic.Int64 确保并发安全的原子操作。
 type Stats struct {
-	RequestsPseudonymized int64
-	RequestsRestored      int64
-	RequestsFailed        int64
-	SpansDetected         int64
+	RequestsPseudonymized atomic.Int64 // 已完成匿名化处理的请求数
+	RequestsRestored      atomic.Int64 // 已完成还原处理的请求数
+	RequestsFailed        atomic.Int64 // 处理失败的请求数
+	SpansDetected         atomic.Int64 // 检测到的敏感信息片段总数
 }
 
-// NewGateway creates a new privacy gateway.
+// NewGateway 创建一个新的隐私网关实例。
+// 根据配置初始化存储后端、伪造值生成器、检测器和负载均衡客户端。
 func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	mappingStore := cfg.Store
 	if mappingStore == nil {
@@ -101,7 +111,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		}
 		detector = newModelDetectorAdapter(mc)
 	} else {
-		// No detection configured; create a no-op detector.
+		// 未配置检测源，创建空操作检测器
 		detector = &noopDetector{}
 	}
 
@@ -114,9 +124,10 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	}, nil
 }
 
-// Close releases resources held by the gateway.
+// Close 释放网关持有的所有资源。
+// 包括停止后台健康检查协程和关闭存储后端。
 func (g *Gateway) Close() error {
-	// Stop background health check goroutines if using LoadBalancedClient.
+	// 如果使用 LoadBalancedClient，停止后台健康检查协程
 	if g.modelClient != nil {
 		if lb, ok := g.modelClient.(*model.LoadBalancedClient); ok {
 			lb.Close()
@@ -128,8 +139,8 @@ func (g *Gateway) Close() error {
 	return nil
 }
 
-// HealthCheck pings the AI sidecar to verify it is reachable.
-// Returns true if at least one backend responds with HTTP 200.
+// HealthCheck 向 AI sidecar 发送健康检查请求以验证其可达性。
+// 如果至少有一个后端返回 HTTP 200，则返回 true。
 func (g *Gateway) HealthCheck(ctx context.Context) bool {
 	if g.modelClient != nil {
 		ok, err := g.modelClient.HealthCheck(ctx)
@@ -157,19 +168,20 @@ func (g *Gateway) HealthCheck(ctx context.Context) bool {
 	return ok
 }
 
-// Stats returns runtime statistics for the privacy gateway.
+// Stats 返回隐私网关的运行时统计信息快照。
 func (g *Gateway) Stats() Stats {
 	return g.stats
 }
 
-// BeforeRequest implements core.Interceptor. It replaces sensitive values
-// in the request with fake equivalents before the request leaves the network.
+// BeforeRequest 实现 core.Interceptor 接口。
+// 在请求发出之前，将请求中的敏感值替换为伪造的等价值。
+// 本次请求创建的映射会通过请求元数据传递给 AfterResponse。
 func (g *Gateway) BeforeRequest(ctx context.Context, req *core.ChatCompletionRequest) error {
 	sessionID := extractSessionID(ctx, req)
 
 	newReq, mappings, err := g.pseudonymizer.PseudonymizeRequest(ctx, sessionID, req)
 	if err != nil {
-		g.stats.RequestsFailed++
+		g.stats.RequestsFailed.Add(1)
 		core.GetLogger().Error("privacy_before_request failed",
 			"session", sessionID,
 			"error", err,
@@ -181,23 +193,24 @@ func (g *Gateway) BeforeRequest(ctx context.Context, req *core.ChatCompletionReq
 		return fmt.Errorf("privacy gateway: %w", err)
 	}
 
-	// Pass mappings to AfterResponse via request metadata so only
-	// the mappings created in this request are restored.
+	// 将本次请求创建的映射通过请求元数据传递给 AfterResponse，
+	// 确保只还原本次请求的映射，而非历史映射。
 	if len(mappings) > 0 {
 		if newReq.Metadata == nil {
 			newReq.Metadata = make(map[string]any)
 		}
 		newReq.Metadata["privacy_mappings"] = mappings
-		g.stats.RequestsPseudonymized++
-		g.stats.SpansDetected += int64(len(mappings))
+		g.stats.RequestsPseudonymized.Add(1)
+		g.stats.SpansDetected.Add(int64(len(mappings)))
 	}
 
 	*req = *newReq
 	return nil
 }
 
-// AfterResponse implements core.Interceptor. It restores fake values in the
-// AI response back to their original values.
+// AfterResponse 实现 core.Interceptor 接口。
+// 将 AI 响应中的伪造值还原为原始值。
+// 优先使用 BeforeRequest 阶段传递的精确映射，回退到全量会话映射。
 func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequest, resp *core.ChatCompletionResponse, err error) (*core.ChatCompletionResponse, error) {
 	if err != nil || resp == nil {
 		return resp, err
@@ -205,8 +218,8 @@ func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequ
 
 	sessionID := extractSessionID(ctx, &req)
 
-	// Use only the mappings created during this request's BeforeRequest.
-	// This prevents restoring historical fake values from earlier turns.
+	// 优先使用 BeforeRequest 阶段通过元数据传递的映射。
+	// 这可以防止误还原历史会话中遗留的伪造值。
 	if raw, ok := req.Metadata["privacy_mappings"]; ok {
 		if mappings, ok := raw.([]core.PrivacyMapping); ok && len(mappings) > 0 {
 			restored, rerr := g.pseudonymizer.RestoreResponseWithMappings(ctx, sessionID, resp, mappings)
@@ -220,12 +233,12 @@ func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequ
 				}
 				return nil, fmt.Errorf("privacy restore: %w", rerr)
 			}
-			g.stats.RequestsRestored++
+			g.stats.RequestsRestored.Add(1)
 			return restored, nil
 		}
 	}
 
-	// Fallback: no mappings in metadata (should not happen in normal flow).
+	// 回退路径：元数据中无映射信息（正常流程中不应发生）
 	restored, rerr := g.pseudonymizer.RestoreResponse(ctx, sessionID, resp)
 	if rerr != nil {
 		core.GetLogger().Error("privacy_after_response failed",
@@ -240,12 +253,12 @@ func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequ
 	return restored, nil
 }
 
-// AfterStreamChunk implements core.Interceptor. It restores fake values in
-// streaming chunks on the fly.
+// AfterStreamChunk 实现 core.Interceptor 接口。
+// 在流式响应传输过程中实时还原伪造值。
 func (g *Gateway) AfterStreamChunk(ctx context.Context, req core.ChatCompletionRequest, chunk *core.StreamChunk) error {
 	sessionID := extractSessionID(ctx, &req)
 
-	// Wrap in StreamCompletionResponse for the pseudonymizer.
+	// 将 StreamChunk 包装为 StreamCompletionResponse 以复用匿名化处理器的还原逻辑
 	wrapped := &core.StreamCompletionResponse{Chunk: *chunk}
 	g.pseudonymizer.RestoreStreamChunk(ctx, sessionID, wrapped)
 	*chunk = wrapped.Chunk
@@ -253,15 +266,14 @@ func (g *Gateway) AfterStreamChunk(ctx context.Context, req core.ChatCompletionR
 	return nil
 }
 
-// AfterStreamDone implements core.Interceptor. It performs cleanup after a
-// streaming session ends.
+// AfterStreamDone 实现 core.Interceptor 接口。
+// 在流式会话结束后执行清理操作（预留接口，未来可用于审计日志、会话清理等）。
 func (g *Gateway) AfterStreamDone(ctx context.Context, req core.ChatCompletionRequest, err error) error {
-	// Future: audit logging, session cleanup, etc.
+	// 预留：审计日志、会话清理等功能
 	return nil
 }
 
-// ToInterceptor converts the gateway into a core.Interceptor for use with
-// AoEo's scheduler options.
+// ToInterceptor 将网关转换为 core.Interceptor，用于 AoEo 调度器的选项配置。
 func (g *Gateway) ToInterceptor() core.Interceptor {
 	return core.Interceptor{
 		BeforeRequest:    g.BeforeRequest,
@@ -272,9 +284,11 @@ func (g *Gateway) ToInterceptor() core.Interceptor {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// 内部辅助函数
 // ---------------------------------------------------------------------------
 
+// noopDetector 是空操作检测器，不执行任何敏感信息检测。
+// 用于未配置检测源时的默认回退。
 type noopDetector struct{}
 
 func (n *noopDetector) Detect(text string) DetectResult {
@@ -285,36 +299,47 @@ func (n *noopDetector) DetectBatch(texts []string) []DetectResult {
 	return make([]DetectResult, len(texts))
 }
 
-// splitEndpoints splits a comma-separated endpoint string.
+// splitEndpoints 将逗号分隔的端点字符串拆分为端点列表。
+// 会过滤掉空字符串和仅含空白字符的条目，防止配置中的尾逗号导致无效端点。
 func splitEndpoints(s string) []string {
 	if s == "" {
 		return nil
 	}
 	parts := strings.Split(s, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
+	// 过滤空字符串，避免无效端点进入负载均衡池
+	filtered := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
 	}
-	return parts
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
-// extractSessionID retrieves a session identifier from the context or request.
-// If none is found, a default empty string is used (all requests share
-// mappings, which is acceptable for single-user deployments).
+// extractSessionID 从上下文或请求中提取会话标识符。
+// 查找优先级：
+//  1. 使用类型安全的 contextKey 从上下文中读取
+//  2. 从请求标签中查找 "session:" 前缀的标签
+//  3. 回退到 "default"（适用于单用户部署场景）
 func extractSessionID(ctx context.Context, req *core.ChatCompletionRequest) string {
-	// Try to read from context first.
-	if v := ctx.Value("privacy_session_id"); v != nil {
+	// 优先从上下文中读取（使用类型安全的 contextKey 避免键冲突）
+	if v := ctx.Value(sessionContextKey); v != nil {
 		if s, ok := v.(string); ok && s != "" {
 			return s
 		}
 	}
 
-	// Fall back to request tags.
+	// 回退到请求标签中查找
 	for _, tag := range req.Tags {
 		if strings.HasPrefix(tag, "session:") {
 			return strings.TrimPrefix(tag, "session:")
 		}
 	}
 
-	// Default: empty session (shared mappings).
+	// 默认：使用共享映射的空会话（适用于单用户部署）
 	return "default"
 }

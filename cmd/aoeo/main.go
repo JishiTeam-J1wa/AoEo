@@ -314,8 +314,8 @@ func cmdPrivacy(args []string) {
 	}
 
 	stats := gw.Stats()
-	fmt.Printf("Pseudonymized: %d\n", stats.RequestsPseudonymized)
-	fmt.Printf("Restored:      %d\n", stats.RequestsRestored)
-	fmt.Printf("Failed:        %d\n", stats.RequestsFailed)
-	fmt.Printf("Spans detected: %d\n", stats.SpansDetected)
+	fmt.Printf("Pseudonymized: %d\n", stats.RequestsPseudonymized.Load())
+	fmt.Printf("Restored:      %d\n", stats.RequestsRestored.Load())
+	fmt.Printf("Failed:        %d\n", stats.RequestsFailed.Load())
+	fmt.Printf("Spans detected: %d\n", stats.SpansDetected.Load())
 }

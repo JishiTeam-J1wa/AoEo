@@ -13,16 +13,18 @@ import (
 
 var privacyLog = core.GetLogger()
 
-// Pseudonymizer is the core reversible privacy gateway.
-// It detects sensitive values, replaces them with realistic fakes,
-// and can restore the original values from AI responses.
+// Pseudonymizer 是可逆隐私网关的核心组件。
+// 它负责检测敏感值（PII），将其替换为逼真的伪造值，
+// 并能在 AI 响应返回后从映射存储中还原原始值。
+// 整个流程分为：检测 -> 替换 -> 存储映射 -> 还原。
 type Pseudonymizer struct {
-	store     store.MappingStore
-	generator *FakeGenerator
-	detector  Detector
+	store     store.MappingStore  // 映射存储后端，保存 fake<->original 的双向映射
+	generator *FakeGenerator      // 伪造值生成器，根据标签类型生成逼真的替换值
+	detector  Detector            // 敏感信息检测器，可以是本地模型或远程 sidecar
 }
 
-// NewPseudonymizer creates a new pseudonymizer.
+// NewPseudonymizer 创建一个新的匿名化处理器。
+// 需要传入三个依赖：映射存储、伪造值生成器和敏感信息检测器。
 func NewPseudonymizer(store store.MappingStore, generator *FakeGenerator, detector Detector) *Pseudonymizer {
 	return &Pseudonymizer{
 		store:     store,
@@ -31,24 +33,30 @@ func NewPseudonymizer(store store.MappingStore, generator *FakeGenerator, detect
 	}
 }
 
-// PseudonymizeRequest processes a request before it leaves for the AI provider.
-// It returns a new request with sensitive values replaced, and the list of
-// mappings created during this operation.
+// PseudonymizeRequest 处理即将发送给 AI 提供商的请求。
+// 流程：
+//  1. 批量检测所有消息中的敏感信息片段（Span）
+//  2. 按长度降序排列，避免短字符串干扰长字符串的替换
+//  3. 为每个敏感值生成伪造替换值，优先复用已有映射，同时避免碰撞
+//  4. 将映射持久化到存储后端
+//  5. 在所有消息内容中执行替换
+//
+// 返回替换后的新请求和本次创建的映射列表。
 func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID string, req *core.ChatCompletionRequest) (*core.ChatCompletionRequest, []core.PrivacyMapping, error) {
-	// 1. Detect all sensitive spans using batch API.
+	// 第一步：使用批量检测 API 扫描所有消息中的敏感信息片段
 	parts := make([]string, len(req.Messages))
 	for i, m := range req.Messages {
 		parts[i] = m.Content
 	}
 	batchResults := p.detector.DetectBatch(parts)
 
-	// Merge spans from all messages (offset stays per-message).
+	// 汇总所有消息中检测到的敏感片段（偏移量按每条消息独立计算）
 	var spans []Span
 	for _, dr := range batchResults {
 		spans = append(spans, dr.Spans...)
 	}
 
-	// Compute total text length for logging.
+	// 计算文本总长度，用于日志记录
 	totalLen := 0
 	for _, p := range parts {
 		totalLen += len(p)
@@ -63,31 +71,31 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 		return req, nil, nil
 	}
 
-	// 2. Sort by length descending to avoid short-string interference.
+	// 第二步：按原始值长度降序排列，避免短字符串先被替换导致长字符串匹配失败
 	sort.Slice(spans, func(i, j int) bool {
 		return len(spans[i].Original) > len(spans[j].Original)
 	})
 
-	// 3. Build replacements, reusing existing mappings when possible.
-	replacements := make(map[string]string) // original -> fake
+	// 第三步：构建替换映射表，优先复用已有映射，减少不必要的生成
+	replacements := make(map[string]string) // original -> fake 的映射表
 	var mappings []core.PrivacyMapping
 
 	for _, span := range spans {
 		original := span.Original
 		if _, ok := replacements[original]; ok {
-			continue
+			continue // 同一个原始值已处理过，跳过
 		}
 
-		// Check if we already have a mapping for this value.
+		// 检查该会话中是否已存在该原始值的映射（复用历史映射）
 		if fake, ok, _ := p.store.GetFake(ctx, sessionID, original); ok {
 			replacements[original] = fake
 			continue
 		}
 
-		// Generate a new fake value.
+		// 生成新的伪造值
 		fake := p.generator.Generate(span.Label, original)
 
-		// Ensure no collision with existing fakes in this session.
+		// 碰撞检测：确保该会话中不存在相同伪造值的映射
 		for {
 			_, exists, _ := p.store.GetOriginal(ctx, sessionID, fake)
 			if !exists {
@@ -96,7 +104,7 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 			fake = p.generator.Generate(span.Label, original)
 		}
 
-		// Persist the mapping.
+		// 将映射持久化到存储后端
 		if err := p.store.Set(ctx, sessionID, fake, original, string(span.Label)); err != nil {
 			return nil, nil, fmt.Errorf("create mapping: %w", err)
 		}
@@ -111,15 +119,14 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 		replacements[original] = fake
 		mappings = append(mappings, m)
 
+		// 安全修复：日志中不再记录原始 PII 值和伪造值，仅记录类型信息，防止敏感信息泄露到日志
 		privacyLog.Info("privacy_replace",
 			"session", sessionID,
 			"type", span.Label,
-			"original", original,
-			"fake", fake,
 		)
 	}
 
-	// 4. Apply replacements to each message individually.
+	// 第四步：对所有消息内容逐一执行替换操作
 	cloned := req.Clone()
 	for i := range cloned.Messages {
 		for orig, fake := range replacements {
@@ -135,8 +142,9 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 	return &cloned, mappings, nil
 }
 
-// RestoreResponse processes an AI response, restoring fake values back to
-// their originals using all session mappings.
+// RestoreResponse 处理 AI 响应，将响应中的伪造值还原为原始值。
+// 从存储后端加载该会话的全部映射关系进行还原。
+// 适用于无法传入精确映射的场景（如历史会话回放）。
 func (p *Pseudonymizer) RestoreResponse(ctx context.Context, sessionID string, resp *core.ChatCompletionResponse) (*core.ChatCompletionResponse, error) {
 	if resp == nil {
 		return nil, nil
@@ -149,10 +157,9 @@ func (p *Pseudonymizer) RestoreResponse(ctx context.Context, sessionID string, r
 	return p.restoreWithEntries(ctx, sessionID, resp, entries)
 }
 
-// RestoreResponseWithMappings restores only the provided mappings.
-// This is the preferred path when the caller knows exactly which fake values
-// were created for the current request, avoiding false restoration of
-// historical fake values from earlier turns.
+// RestoreResponseWithMappings 使用指定的映射列表还原 AI 响应中的伪造值。
+// 这是首选的还原路径，因为调用者明确知道当前请求创建了哪些映射，
+// 可以避免误还原历史会话中遗留的伪造值（防止"过度还原"问题）。
 func (p *Pseudonymizer) RestoreResponseWithMappings(ctx context.Context, sessionID string, resp *core.ChatCompletionResponse, mappings []core.PrivacyMapping) (*core.ChatCompletionResponse, error) {
 	if resp == nil {
 		return nil, nil
@@ -161,6 +168,7 @@ func (p *Pseudonymizer) RestoreResponseWithMappings(ctx context.Context, session
 		return resp, nil
 	}
 
+	// 将 core.PrivacyMapping 转换为 store.Entry 以复用内部还原逻辑
 	entries := make([]store.Entry, len(mappings))
 	for i, m := range mappings {
 		entries[i] = store.Entry{
@@ -172,12 +180,17 @@ func (p *Pseudonymizer) RestoreResponseWithMappings(ctx context.Context, session
 	return p.restoreWithEntries(ctx, sessionID, resp, entries)
 }
 
+// restoreWithEntries 是内部还原核心函数，使用给定的映射条目列表还原响应内容。
+// 流程：
+//  1. 按伪造值长度降序排列，避免部分匹配导致的错误还原
+//  2. 遍历所有响应选项，逐一执行替换
+//  3. 泄漏检测：扫描响应中是否仍有未还原的伪造值
 func (p *Pseudonymizer) restoreWithEntries(ctx context.Context, sessionID string, resp *core.ChatCompletionResponse, entries []store.Entry) (*core.ChatCompletionResponse, error) {
 	if len(entries) == 0 {
 		return resp, nil
 	}
 
-	// Sort by fake value length descending to avoid partial replacements.
+	// 按伪造值长度降序排列，防止短伪造值先被替换导致长伪造值无法匹配
 	sort.Slice(entries, func(i, j int) bool {
 		return len(entries[i].Fake) > len(entries[j].Fake)
 	})
@@ -194,7 +207,7 @@ func (p *Pseudonymizer) restoreWithEntries(ctx context.Context, sessionID string
 		resp.Choices[i].Message.Content = text
 	}
 
-	// Leak detection: scan for any remaining fake values.
+	// 泄漏检测：扫描所有响应选项，检查是否仍有残留的伪造值
 	leaks := p.detectLeaks(resp, entries)
 	if len(leaks) > 0 {
 		privacyLog.Warn("privacy_restore_leak",
@@ -213,7 +226,9 @@ func (p *Pseudonymizer) restoreWithEntries(ctx context.Context, sessionID string
 	return resp, nil
 }
 
-// RestoreStreamChunk restores fake values in a streaming chunk.
+// RestoreStreamChunk 在流式响应传输过程中实时还原伪造值。
+// 从存储后端加载该会话的全部映射，对每个流式数据块的内容进行替换。
+// 由于流式场景对性能敏感，如果加载映射失败或为空则直接跳过。
 func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string, chunk *core.StreamCompletionResponse) {
 	if chunk == nil || chunk.Err != nil {
 		return
@@ -224,6 +239,7 @@ func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string
 		return
 	}
 
+	// 按伪造值长度降序排列，确保长值优先替换
 	sort.Slice(entries, func(i, j int) bool {
 		return len(entries[i].Fake) > len(entries[j].Fake)
 	})
@@ -244,23 +260,22 @@ func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string
 }
 
 // ---------------------------------------------------------------------------
-// Restoration helpers
+// 还原辅助函数
 // ---------------------------------------------------------------------------
 
-// replaceFake replaces fake with original in text. It first tries exact match,
-// then tries common punctuation boundaries (AI often adds punctuation after
-// generated values).
+// replaceFake 将文本中的伪造值替换回原始值。
+// 先尝试精确匹配替换，再尝试处理 AI 常见的标点符号边界情况
+// （AI 模型经常在生成的值后面添加标点，如句号、逗号等）。
 func replaceFake(text, fake, original string) string {
-	// Exact replacement.
+	// 精确匹配替换
 	text = strings.ReplaceAll(text, fake, original)
 
-	// Fuzzy: fake followed by common punctuation.
-	// If the fake ends with a digit or letter, AI may append . , ! ? ; :
+	// 模糊匹配：伪造值后面紧跟常见标点符号的情况
 	puncts := []string{".", ",", "!", "?", ";", ":", ")", "]", "}"}
 	for _, p := range puncts {
 		text = strings.ReplaceAll(text, fake+p, original+p)
 	}
-	// Fuzzy: fake preceded by opening punctuation.
+	// 模糊匹配：伪造值前面有左括号等开标点的情况
 	opens := []string{"(", "[", "{"}
 	for _, p := range opens {
 		text = strings.ReplaceAll(text, p+fake, p+original)
@@ -269,10 +284,11 @@ func replaceFake(text, fake, original string) string {
 	return text
 }
 
-// detectLeaks scans all response choices for any remaining fake values.
+// detectLeaks 扫描响应的所有选项，检测是否仍有残留的伪造值未被还原。
+// 返回去重后的泄漏伪造值列表，用于告警和日志记录。
 func (p *Pseudonymizer) detectLeaks(resp *core.ChatCompletionResponse, entries []store.Entry) []string {
 	var leaks []string
-	seen := make(map[string]bool)
+	seen := make(map[string]bool) // 用于去重，同一个伪造值只报告一次
 	for i := range resp.Choices {
 		text := resp.Choices[i].Message.Content
 		for _, e := range entries {

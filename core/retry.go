@@ -4,17 +4,17 @@ import (
 	"time"
 )
 
-// RetryConfig controls the exponential backoff retry behavior.
+// RetryConfig 控制指数退避重试行为。
 type RetryConfig struct {
-	MaxRetries int           // Maximum number of retries (0 = disabled)
-	BaseDelay  time.Duration // Initial delay between retries
-	MaxDelay   time.Duration // Maximum delay between retries
-	Multiplier float64       // Exponential multiplier (default 2.0)
+	MaxRetries int           // 最大重试次数（0 = 禁用）
+	BaseDelay  time.Duration // 重试间的初始延迟
+	MaxDelay   time.Duration // 重试间的最大延迟
+	Multiplier float64       // 指数退避乘数（默认 2.0）
 	Retryable  func(error) bool
 }
 
-// Validate checks the retry configuration for invalid values.
-// Returns a slice of error messages; empty slice means valid.
+// Validate 校验重试配置是否合法。
+// 返回错误信息切片，空切片表示配置有效。
 func (cfg RetryConfig) Validate() []string {
 	var issues []string
 	if cfg.MaxRetries < 0 {
@@ -35,7 +35,7 @@ func (cfg RetryConfig) Validate() []string {
 	return issues
 }
 
-// DefaultRetryConfig returns a sensible default retry configuration.
+// DefaultRetryConfig 返回一组合理的默认重试配置。
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxRetries: 2,
@@ -46,25 +46,29 @@ func DefaultRetryConfig() RetryConfig {
 	}
 }
 
-// IsRetryableError returns true for errors that are typically transient.
+// transientPatterns 定义可重试的错误关键字列表。
+// 匹配到任意关键字的错误被视为临时性错误，值得重试。
+var transientPatterns = []string{
+	"timeout",
+	"deadline exceeded",
+	"connection refused",
+	"no such host",
+	"temporary",
+	"too many requests",
+	"rate limit",
+	"503",
+	"502",
+	"504",
+}
+
+// IsRetryableError 判断错误是否为可重试的临时性错误。
+// 通过匹配错误信息中的关键字（如 timeout、503 等）进行判断。
 func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
 	errStr := err.Error()
-	transient := []string{
-		"timeout",
-		"deadline exceeded",
-		"connection refused",
-		"no such host",
-		"temporary",
-		"too many requests",
-		"rate limit",
-		"503",
-		"502",
-		"504",
-	}
-	for _, pattern := range transient {
+	for _, pattern := range transientPatterns {
 		if containsIgnoreCase(errStr, pattern) {
 			return true
 		}

@@ -8,57 +8,17 @@ import (
 	"time"
 )
 
-// LoadConfigFromEnv builds a Config from environment variables.
-//
-// Supported variables (prefix all with AOEO_):
-//
-//	PROVIDER_{N}_NAME           - Provider name (deepseek, kimi, glm, qwen, or custom)
-//	PROVIDER_{N}_API_KEY        - API key for the provider
-//	PROVIDER_{N}_ENDPOINT       - Base URL endpoint
-//	PROVIDER_{N}_MODEL          - Default model ID
-//	PROVIDER_{N}_MAX_CONCURRENT - Max concurrent requests (default 2)
-//	PROVIDER_{N}_SKIP_TLS_VERIFY- Set to "true" to skip TLS verification
-//	AUDIT_ENABLED               - Set to "true" to enable audit mode
-//
-// {N} is a zero-based index. Gaps in numbering terminate the scan.
-// Returns an empty Config if no provider variables are found.
+// LoadConfigFromEnv 从 AOEO_PROVIDER_N_* 环境变量加载多 Provider 配置。
+// 索引从 0 开始，遇到空位（NAME 为空）终止扫描。
+// 同时加载 AOEO_AUDIT_ENABLED 和 AOEO_RETRY_* 配置。
 func LoadConfigFromEnv() Config {
-	var providers []ProviderConfig
-	for i := 0; ; i++ {
-		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
-		name := os.Getenv(prefix + "NAME")
-		if name == "" {
-			break // gap terminates scan
-		}
-		cfg := ProviderConfig{
-			Name:     name,
-			APIKey:   os.Getenv(prefix + "API_KEY"),
-			Endpoint: os.Getenv(prefix + "ENDPOINT"),
-			Model:    os.Getenv(prefix + "MODEL"),
-		}
-		if v := os.Getenv(prefix + "MAX_CONCURRENT"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				cfg.MaxConcurrent = n
-			}
-		}
-		if strings.EqualFold(os.Getenv(prefix+"SKIP_TLS_VERIFY"), "true") {
-			cfg.SkipTLSVerify = true
-		}
-		cfg.Proxy = os.Getenv(prefix + "PROXY")
-		providers = append(providers, cfg)
-	}
-
-	cfg := Config{Providers: providers}
-	if strings.EqualFold(os.Getenv("AOEO_AUDIT_ENABLED"), "true") {
-		cfg.AuditEnabled = true
-	}
-	return cfg
+	return LoadConfigFromEnvWithPrefix("AOEO")
 }
 
-// LoadConfigFromEnvWithPrefix builds a Config using a custom environment variable prefix.
-// For prefix "MYAPP", variables are read as MYAPP_PROVIDER_0_NAME, etc.
+// LoadConfigFromEnvWithPrefix 使用自定义前缀从环境变量构建 Config。
+// 例如前缀为 "MYAPP" 时，将读取 MYAPP_PROVIDER_0_NAME 等变量。
+// 扫描逻辑与 LoadConfigFromEnv 相同：从索引 0 开始，遇到 NAME 为空时终止。
 func LoadConfigFromEnvWithPrefix(prefix string) Config {
-	oldPrefix := "AOEO_"
 	var providers []ProviderConfig
 	for i := 0; ; i++ {
 		p := fmt.Sprintf("%s_PROVIDER_%d_", prefix, i)
@@ -88,13 +48,12 @@ func LoadConfigFromEnvWithPrefix(prefix string) Config {
 	if strings.EqualFold(os.Getenv(prefix+"_AUDIT_ENABLED"), "true") {
 		cfg.AuditEnabled = true
 	}
-	_ = oldPrefix // unused but kept for documentation
 	return cfg
 }
 
-// EnvConfigString returns a single provider config string in the form
-// "name|apiKey|endpoint|model|maxConcurrent|proxy" used by some simplified deployments.
-// If the variable is not set, an empty ProviderConfig is returned.
+// EnvConfigString 从单个环境变量中解析 Provider 配置。
+// 环境变量值的格式为 "name|apiKey|endpoint|model|maxConcurrent|proxy"，
+// 用于简化部署场景。如果变量未设置，返回空的 ProviderConfig。
 func EnvConfigString(envVar string) ProviderConfig {
 	s := os.Getenv(envVar)
 	if s == "" {
@@ -125,8 +84,8 @@ func EnvConfigString(envVar string) ProviderConfig {
 	return cfg
 }
 
-// SetEnvConfig writes a Config back to environment variables.
-// Primarily used for testing and tooling; not recommended for production secrets.
+// SetEnvConfig 将 Config 写入环境变量。
+// 主要用于测试和工具链，不建议在生产环境中用于存储敏感密钥。
 func SetEnvConfig(cfg Config) {
 	for i, pc := range cfg.Providers {
 		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
@@ -149,7 +108,7 @@ func SetEnvConfig(cfg Config) {
 	}
 }
 
-// UnsetEnvConfig removes all AOEO_ environment variables set by SetEnvConfig.
+// UnsetEnvConfig 清除由 SetEnvConfig 设置的所有 AOEO_ 环境变量。
 func UnsetEnvConfig(cfg Config) {
 	for i := range cfg.Providers {
 		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
@@ -164,12 +123,12 @@ func UnsetEnvConfig(cfg Config) {
 	os.Unsetenv("AOEO_AUDIT_ENABLED")
 }
 
-// RetryConfigFromEnv loads retry settings from environment.
+// RetryConfigFromEnv 从环境变量加载重试配置。
 //
-//	AOEO_RETRY_MAX_RETRIES  - default 0 (disabled)
-//	AOEO_RETRY_BASE_DELAY   - default 1s
-//	AOEO_RETRY_MAX_DELAY    - default 30s
-//	AOEO_RETRY_MULTIPLIER   - default 2.0
+//	AOEO_RETRY_MAX_RETRIES  - 最大重试次数，默认 0（禁用）
+//	AOEO_RETRY_BASE_DELAY   - 基础延迟时间，默认 1s
+//	AOEO_RETRY_MAX_DELAY    - 最大延迟时间，默认 30s
+//	AOEO_RETRY_MULTIPLIER   - 指数退避乘数，默认 2.0
 func RetryConfigFromEnv() RetryConfig {
 	cfg := RetryConfig{}
 	if v := os.Getenv("AOEO_RETRY_MAX_RETRIES"); v != "" {

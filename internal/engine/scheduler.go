@@ -332,7 +332,19 @@ func (s *Scheduler) runHealthChecks() {
 	}
 }
 
-// ChatComplete performs a chat completion using the primary (first available) provider.
+// ChatComplete 使用主（首个可用的）Provider 执行一次聊天补全请求。
+// 执行流程：
+//  1. 检查调度器是否已关闭
+//  2. 通过信号量获取并发槽位（限制同时请求数）
+//  3. 通过路由器选择最合适的 Provider
+//  4. 深拷贝请求（避免修改调用方的 Messages 切片等）
+//  5. 应用 Prompt 注入（如已配置）
+//  6. 执行拦截器的 BeforeRequest 钩子
+//  7. 调用 Provider 的 ChatComplete（支持自动重试）
+//  8. 执行拦截器的 AfterResponse 钩子并记录历史
+//
+// 修复 SCHED-01：始终使用 req.Clone() 进行深拷贝，避免浅拷贝导致
+// Messages 等切片字段与原始请求共享底层数组，进而引发数据竞争。
 func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -347,23 +359,18 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 		return nil, err
 	}
 
-	// Fill default model from provider config if not specified.
-	reqCopy := req
+	// 始终使用深拷贝，避免修改调用方的原始请求（特别是 Messages 切片的底层数组）
+	reqCopy := req.Clone()
 	if reqCopy.Model == "" {
 		reqCopy.Model = p.Config().Model
 	}
 
-	// Apply prompt injection if configured.
-	// Clone to avoid mutating the caller's original Messages slice.
+	// 应用 Prompt 注入（如果已配置）
 	if pi := s.promptInjector.Load(); pi != nil {
-		reqCopy = req.Clone()
-		if reqCopy.Model == "" {
-			reqCopy.Model = p.Config().Model
-		}
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
-	// Apply interceptor BeforeRequest hooks.
+	// 执行拦截器的 BeforeRequest 钩子
 	chain := s.interceptorChain()
 	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
 		return nil, err
@@ -398,8 +405,21 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 	return resp, err
 }
 
-// ChatCompleteWithFallback tries the primary provider first; on failure,
-// it falls back to the next available provider automatically.
+// ChatCompleteWithFallback 尝试使用主 Provider 执行请求；如果失败，
+// 自动回退到下一个可用的 Provider，直到成功或所有 Provider 都失败。
+// 执行流程：
+//  1. 检查调度器是否已关闭，获取可用 Provider 列表
+//  2. 执行拦截器的 BeforeRequest 钩子（仅一次，在回退循环之前）
+//  3. 通过路由器确定回退顺序（优先使用路由器的排序结果）
+//  4. 遍历 Provider 列表，依次尝试调用：
+//     - 获取信号量槽位
+//     - 深拷贝请求并填充默认模型
+//     - 应用 Prompt 注入
+//     - 调用 Provider 的 ChatComplete（支持自动重试）
+//     - 记录历史
+//  5. 如果某个 Provider 成功则立即返回，否则继续下一个
+//
+// 修复 SCHED-02：始终使用 req.Clone() 进行深拷贝，与 SCHED-01 修复一致。
 func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -443,15 +463,13 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 			return nil, err
 		}
 
-		reqCopy := req
+		// 始终使用深拷贝，避免修改调用方的原始请求（修复 SCHED-02）
+		reqCopy := req.Clone()
 		if reqCopy.Model == "" {
 			reqCopy.Model = p.Config().Model
 		}
+		// 应用 Prompt 注入（如果已配置）
 		if pi := s.promptInjector.Load(); pi != nil {
-			reqCopy = req.Clone()
-			if reqCopy.Model == "" {
-				reqCopy.Model = p.Config().Model
-			}
 			pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 		}
 
@@ -496,8 +514,11 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 	return nil, fmt.Errorf("%w, last error: %w", ErrAllProvidersFailed, lastErr)
 }
 
-// ChatCompleteDual sends the request to two different providers concurrently
-// and returns both results for comparison/merging.
+// ChatCompleteDual 将请求同时发送给两个不同的 Provider 并发执行，
+// 并返回两个结果用于对比或合并分析。
+// 适用场景：模型对比评测、结果一致性校验、冗余容灾等。
+// 如果只有一个可用 Provider，则降级为普通的 ChatComplete 调用。
+// 该操作会占用 2 个并发信号量槽位。
 func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletionRequest) (*core.DualResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -507,13 +528,13 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 		return nil, ErrNoAvailableProvider
 	}
 
-	// Apply interceptor BeforeRequest hooks once before the dual call.
+	// 在双路调用之前，仅执行一次拦截器的 BeforeRequest 钩子
 	chain := s.interceptorChain()
 	if err := chain.ApplyBefore(ctx, &req); err != nil {
 		return nil, err
 	}
 
-	// Use router to pick two distinct providers if available.
+	// 优先通过路由器选择两个不同的 Provider
 	var p1, p2 providers.Provider
 	if r := s.router.Load(); r != nil {
 		status := s.ProviderStatus()

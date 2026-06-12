@@ -3,34 +3,39 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"math/rand/v2"
 	"sync/atomic"
 )
 
-// WeightStrategy determines how the WeightedRouter scores providers.
+// WeightStrategy 定义加权路由器的评分策略。
 type WeightStrategy int
 
 const (
-	StrategyLatency WeightStrategy = iota     // lower latency = higher weight
-	StrategySuccessRate                       // higher success rate = higher weight
-	StrategyCombined                          // composite: latency 50% + success rate 50%
+	StrategyLatency     WeightStrategy = iota // 延迟越低，权重越高
+	StrategySuccessRate                       // 成功率越高，权重越高
+	StrategyCombined                          // 综合评分：延迟 50% + 成功率 50%
 )
 
-// SingleProviderRouter forces selection of a specific provider by name.
-// It is useful for CLI tools and debugging that need to target one provider.
+// SingleProviderRouter 强制选择指定名称的 Provider。
+// 适用于 CLI 工具和调试场景，需要固定请求某个特定 Provider。
 type SingleProviderRouter struct {
 	Name string
 }
 
+// Select 从候选列表中查找与指定名称匹配且可用的 Provider。
+// 如果找不到，返回包含 Provider 名称的错误信息。
 func (r *SingleProviderRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	for i, c := range candidates {
 		if c.Name == r.Name && c.Available {
 			return i, nil
 		}
 	}
-	return -1, errors.New("provider not available")
+	return -1, fmt.Errorf("provider %q not available", r.Name)
 }
 
+// SelectSequence 返回仅包含目标 Provider 索引的单元素序列。
 func (r *SingleProviderRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	idx, err := r.Select(ctx, candidates, req)
 	if err != nil {
@@ -39,22 +44,23 @@ func (r *SingleProviderRouter) SelectSequence(ctx context.Context, candidates []
 	return []int{idx}, nil
 }
 
-// Router decides which provider(s) to use for a given request.
-// Implementations must be safe for concurrent use.
+// Router 接口决定对给定请求使用哪个 Provider。
+// 实现必须是并发安全的。
 type Router interface {
-	// Select picks a single provider from the candidate list.
-	// Returns the index into candidates, or an error if none are suitable.
+	// Select 从候选列表中选择一个 Provider。
+	// 返回候选列表中的索引，如果没有合适的 Provider 则返回 error。
 	Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error)
 
-	// SelectSequence returns an ordered list of candidate indices to try
-	// for fallback-style requests. The scheduler tries each in order
-	// until one succeeds.
+	// SelectSequence 返回一个有序的候选索引列表，用于降级重试场景。
+	// 调度器按顺序依次尝试，直到某个 Provider 成功响应。
 	SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error)
 }
 
-// PrimaryRouter always selects the first available provider.
+// PrimaryRouter 始终选择第一个可用的 Provider。
+// 适用于主备模式，优先使用排名靠前的 Provider。
 type PrimaryRouter struct{}
 
+// Select 返回第一个可用 Provider 的索引。
 func (r *PrimaryRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	for i, c := range candidates {
 		if c.Available {
@@ -64,6 +70,7 @@ func (r *PrimaryRouter) Select(ctx context.Context, candidates []ProviderStatus,
 	return -1, errors.New("no available provider")
 }
 
+// SelectSequence 返回所有可用 Provider 的索引序列，按原始顺序排列。
 func (r *PrimaryRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	var seq []int
 	for i, c := range candidates {
@@ -77,11 +84,13 @@ func (r *PrimaryRouter) SelectSequence(ctx context.Context, candidates []Provide
 	return seq, nil
 }
 
-// RoundRobinRouter distributes requests evenly across available providers.
+// RoundRobinRouter 以轮询方式将请求均匀分配到所有可用的 Provider。
+// 每次调用 Select 都会依次选择下一个 Provider，保证负载均匀分布。
 type RoundRobinRouter struct {
 	idx atomic.Uint64
 }
 
+// Select 使用原子计数器轮询选择下一个可用 Provider。
 func (r *RoundRobinRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	avail := make([]int, 0, len(candidates))
 	for i, c := range candidates {
@@ -96,6 +105,7 @@ func (r *RoundRobinRouter) Select(ctx context.Context, candidates []ProviderStat
 	return avail[next], nil
 }
 
+// SelectSequence 返回所有可用 Provider 的索引序列，起始点随计数器轮转。
 func (r *RoundRobinRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	var seq []int
 	for i, c := range candidates {
@@ -106,7 +116,7 @@ func (r *RoundRobinRouter) SelectSequence(ctx context.Context, candidates []Prov
 	if len(seq) == 0 {
 		return nil, errors.New("no available provider")
 	}
-	// Rotate starting point for variety, but keep full sequence for fallback
+	// 轮转起始点以增加多样性，同时保留完整序列用于降级重试
 	if len(seq) > 1 {
 		start := int(r.idx.Add(1)-1) % len(seq)
 		rotated := make([]int, len(seq))
@@ -118,12 +128,11 @@ func (r *RoundRobinRouter) SelectSequence(ctx context.Context, candidates []Prov
 	return seq, nil
 }
 
-// RandomRouter selects a random available provider using an internal counter.
-// The selection is deterministic per call order, not per request content.
-type RandomRouter struct {
-	counter atomic.Uint64
-}
+// RandomRouter 从所有可用的 Provider 中随机选择一个。
+// 使用 math/rand/v2 实现真正的随机选择，每次调用结果不可预测。
+type RandomRouter struct{}
 
+// Select 使用 math/rand/v2 随机选择一个可用 Provider。
 func (r *RandomRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	var avail []int
 	for i, c := range candidates {
@@ -134,10 +143,10 @@ func (r *RandomRouter) Select(ctx context.Context, candidates []ProviderStatus, 
 	if len(avail) == 0 {
 		return -1, errors.New("no available provider")
 	}
-	h := r.counter.Add(1)
-	return avail[h%uint64(len(avail))], nil
+	return avail[rand.IntN(len(avail))], nil
 }
 
+// SelectSequence 返回所有可用 Provider 的随机排列序列，用于降级重试。
 func (r *RandomRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	var seq []int
 	for i, c := range candidates {
@@ -148,31 +157,27 @@ func (r *RandomRouter) SelectSequence(ctx context.Context, candidates []Provider
 	if len(seq) == 0 {
 		return nil, errors.New("no available provider")
 	}
-	// Shuffle sequence using a counter-based PRNG
-	shuffled := make([]int, len(seq))
-	copy(shuffled, seq)
-	for i := len(shuffled) - 1; i > 0; i-- {
-		h := r.counter.Add(1)
-		j := int(h % uint64(i+1))
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	}
-	return shuffled, nil
+	// 使用 Fisher-Yates 洗牌算法随机打乱序列
+	rand.Shuffle(len(seq), func(i, j int) {
+		seq[i], seq[j] = seq[j], seq[i]
+	})
+	return seq, nil
 }
 
-// WeightedRouter selects providers using weighted scoring based on runtime health metrics.
-// Higher score = more likely to be selected. All selections are deterministic (no math/rand).
+// WeightedRouter 基于运行时健康指标（延迟、成功率等）对 Provider 进行加权评分选择。
+// 评分越高的 Provider 被选中的概率越大。使用确定性计数器实现加权随机。
 type WeightedRouter struct {
 	Strategy WeightStrategy
 	counter  atomic.Uint64
 }
 
-// score computes a weight score for a provider based on the configured strategy.
-// Score is always in range [0, 1].
+// score 根据配置的评分策略计算 Provider 的权重分数。
+// 分数范围始终在 [0, 1] 之间。
 func (r *WeightedRouter) score(status ProviderStatus) float64 {
 	h := status.Health
 	switch r.Strategy {
 	case StrategyLatency:
-		// Lower latency = higher score. Use sigmoid-like decay.
+		// 延迟越低分数越高，使用类 Sigmoid 衰减函数
 		// 0ms -> 1.0, 1000ms -> ~0.5, 5000ms -> ~0.17
 		return 1.0 / (1.0 + float64(h.AvgLatencyMs)/1000.0)
 	case StrategySuccessRate:
@@ -185,6 +190,7 @@ func (r *WeightedRouter) score(status ProviderStatus) float64 {
 	}
 }
 
+// Select 按加权评分随机选择一个可用 Provider，权重越高被选中概率越大。
 func (r *WeightedRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	type scored struct {
 		idx    int
@@ -209,10 +215,9 @@ func (r *WeightedRouter) Select(ctx context.Context, candidates []ProviderStatus
 		return scoredList[0].idx, nil
 	}
 
-	// Deterministic weighted random using counter.
-	// Use a larger step to get meaningful variation even with small counters.
+	// 确定性加权随机选择：使用黄金比例常数改善计数器分布均匀性
 	h := r.counter.Add(1)
-	step := uint64(0x9E3779B97F4A7C15) // golden ratio constant for better distribution
+	step := uint64(0x9E3779B97F4A7C15) // 黄金比例常数，用于改善分布均匀性
 	target := float64(h*step%math.MaxUint64) / float64(math.MaxUint64) * totalWeight
 	var accum float64
 	for _, s := range scoredList {
@@ -224,6 +229,7 @@ func (r *WeightedRouter) Select(ctx context.Context, candidates []ProviderStatus
 	return scoredList[len(scoredList)-1].idx, nil
 }
 
+// SelectSequence 返回按评分降序排列的可用 Provider 索引序列，用于降级重试。
 func (r *WeightedRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	type scored struct {
 		idx   int
@@ -240,7 +246,7 @@ func (r *WeightedRouter) SelectSequence(ctx context.Context, candidates []Provid
 		return nil, errors.New("no available provider")
 	}
 
-	// Sort by score descending (simple bubble for small N, deterministic).
+	// 按评分降序排序（对少量元素使用冒泡排序，保证确定性）
 	for i := 0; i < len(scoredList)-1; i++ {
 		for j := i + 1; j < len(scoredList); j++ {
 			if scoredList[j].score > scoredList[i].score {

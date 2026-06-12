@@ -16,15 +16,25 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-// Provider is the interface that all AI provider adapters must implement.
+// Provider 是所有 AI 模型提供商适配器必须实现的接口。
+// 每个 Provider 封装了与特定 AI 服务（如 DeepSeek、Kimi、GLM 等）的通信逻辑，
+// 支持同步/流式聊天补全、健康检查、模型列表查询等功能。
 type Provider interface {
+	// Name 返回 Provider 的唯一标识名称
 	Name() string
+	// Config 返回 Provider 的当前配置
 	Config() core.ProviderConfig
+	// ChatComplete 执行同步聊天补全请求
 	ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error)
+	// ChatCompleteStream 执行流式聊天补全请求，返回一个接收流式响应的 channel
 	ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error)
+	// IsAvailable 返回 Provider 是否可用（配置完整且未处于熔断冷却期）
 	IsAvailable() bool
+	// ListModels 查询该 Provider 支持的所有可用模型
 	ListModels(ctx context.Context) ([]core.ModelInfo, error)
+	// SetEmitter 设置事件发射器，用于 Provider 生命周期事件通知
 	SetEmitter(e core.EventEmitter)
+	// HealthCheck 执行轻量级的连通性检查
 	HealthCheck(ctx context.Context) error
 }
 
@@ -35,23 +45,29 @@ type healthEntry struct {
 	timestamp time.Time
 }
 
-// BaseProvider provides common logic for all providers (circuit breaker, system prompt override).
-// It is exported for use by custom provider implementations, but most users should use
-// the built-in providers or the generic OpenAIProvider.
+// BaseProvider 为所有 Provider 提供通用逻辑（熔断器、系统 Prompt 覆盖、健康指标追踪）。
+// 它已导出，可供自定义 Provider 实现嵌入使用。
+// 大多数用户应直接使用内置 Provider（如 DeepSeek、Kimi 等）或通用的 OpenAIProvider。
+//
+// 核心功能：
+//   - 熔断器：通过原子计数器追踪连续失败次数，超过阈值后进入冷却期
+//   - 系统 Prompt 覆盖：支持运行时动态设置/清除系统 Prompt
+//   - 健康指标：使用滑动窗口记录最近 20 次调用的延迟和成功率
+//   - 事件发射：在熔断器状态变更时发出事件通知
 type BaseProvider struct {
 	config core.ProviderConfig
 
-	// Circuit breaker: track consecutive failures (all atomic).
+	// 熔断器：追踪连续失败次数（全部使用原子操作，无需加锁）
 	failCount atomic.Int32
-	failUntil atomic.Int64 // UnixNano, 0 means not in cooldown
+	failUntil atomic.Int64 // UnixNano 格式的冷却截止时间，0 表示未处于冷却期
 
-	// System prompt override (atomic pointer to string).
+	// 系统 Prompt 覆盖（原子指针，指向字符串）
 	sysPrompt atomic.Pointer[string]
 
-	// Optional event emitter for provider lifecycle events.
-	emitter atomic.Value // stores *emitterBox
+	// 可选的事件发射器，用于 Provider 生命周期事件通知
+	emitter atomic.Value // 存储 *emitterBox
 
-	// Runtime health metrics (sliding window of recent calls).
+	// 运行时健康指标（滑动窗口，记录最近 20 次调用）
 	healthMu     sync.RWMutex
 	healthWindow [20]healthEntry
 	healthHead   int
@@ -121,6 +137,7 @@ func (b *BaseProvider) pushHealthEntry(entry healthEntry) {
 		}
 	}
 
+	// 使用 Go 1.21+ 内置的 max 函数，无需自定义实现
 	snapshot := &core.ProviderHealth{
 		LastCheckAt:      entry.timestamp,
 		LastLatencyMs:    entry.latencyMs,
@@ -132,14 +149,11 @@ func (b *BaseProvider) pushHealthEntry(entry healthEntry) {
 	b.healthLatest.Store(snapshot)
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+// 注意：此处不再定义自定义 max() 函数。
+// Go 1.21+ 已内置泛型 max/min 函数，本项目使用 Go 1.25，直接使用内置版本。
+// 修复 P-08：移除自定义 max()，避免遮蔽（shadow）内置函数。
 
-// Config returns the provider's configuration.
+// Config 返回 Provider 的当前配置。
 func (b *BaseProvider) Config() core.ProviderConfig {
 	return b.config
 }
@@ -306,16 +320,23 @@ func (b *BaseProvider) ChatCompleteStream(ctx context.Context, req core.ChatComp
 	return nil, fmt.Errorf("provider %s does not support streaming", b.config.Name)
 }
 
-// OpenAIProvider implements a generic OpenAI-compatible provider adapter.
-// It works with any API that follows the OpenAI chat completions protocol,
-// including self-hosted models (vLLM, Ollama, etc.).
+// OpenAIProvider 实现了通用的 OpenAI 兼容协议 Provider 适配器。
+// 它适用于所有遵循 OpenAI Chat Completions 协议的 API 服务，
+// 包括自托管模型（如 vLLM、Ollama 等）以及各商业 AI 服务商的兼容接口。
+//
+// 核心特性：
+//   - 同步聊天补全（ChatComplete）：带自动重试、熔断器、健康指标追踪
+//   - 流式聊天补全（ChatCompleteStream）：通过 channel 逐块返回响应
+//   - 系统 Prompt 覆盖：支持运行时动态切换系统 Prompt
+//   - Temperature 兼容处理：自动检测并兼容不支持自定义 temperature 的模型
 type OpenAIProvider struct {
-	*BaseProvider
-	Client *openai.Client
+	*BaseProvider                   // 嵌入 BaseProvider，继承熔断器、健康指标等通用功能
+	Client       *openai.Client     // OpenAI 兼容协议的客户端实例
 }
 
-// NewOpenAIProvider creates a generic OpenAI-compatible provider.
-// If endpoint is empty, it defaults to "https://api.openai.com/v1".
+// NewOpenAIProvider 创建一个通用的 OpenAI 兼容协议 Provider。
+// 如果 endpoint 为空，默认使用 "https://api.openai.com/v1"。
+// 自动根据配置构建 HTTP 客户端（支持自定义 Transport、代理、跳过 TLS 验证等）。
 func NewOpenAIProvider(config core.ProviderConfig) *OpenAIProvider {
 	if config.Endpoint == "" {
 		config.Endpoint = "https://api.openai.com/v1"
@@ -737,8 +758,9 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 	return result, nil
 }
 
-// ListModels fetches the list of available models from the provider via the
-// OpenAI-compatible /models endpoint. It reuses the provider's HTTP client.
+// isTemperatureError 检查错误消息中是否包含 "temperature" 关键字。
+// 部分模型提供商（如 Kimi kimi-k2.6）仅接受 temperature=1，
+// 当返回 temperature 相关错误时，调度器会自动重试并将 temperature 设为 0（omitempty 会将其忽略）。
 func isTemperatureError(err error) bool {
 	if err == nil {
 		return false
@@ -767,7 +789,10 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]core.ModelInfo, erro
 	return result, nil
 }
 
-// NewDeepSeekProvider creates a DeepSeek provider with sensible defaults.
+// NewDeepSeekProvider 创建 DeepSeek（深度求索）Provider，并设置合理的默认配置。
+// 默认端点：https://api.deepseek.com
+// 默认模型：deepseek-v4-pro
+// 默认名称：deepseek
 func NewDeepSeekProvider(config core.ProviderConfig) Provider {
 	if config.Endpoint == "" {
 		config.Endpoint = "https://api.deepseek.com"
@@ -781,7 +806,10 @@ func NewDeepSeekProvider(config core.ProviderConfig) Provider {
 	return NewOpenAIProvider(config)
 }
 
-// NewKimiProvider creates a Kimi (Moonshot AI) provider with sensible defaults.
+// NewKimiProvider 创建 Kimi（月之暗面 Moonshot AI）Provider，并设置合理的默认配置。
+// 默认端点：https://api.moonshot.cn/v1
+// 默认模型：kimi-k2.6
+// 默认名称：kimi
 func NewKimiProvider(config core.ProviderConfig) Provider {
 	if config.Endpoint == "" {
 		config.Endpoint = "https://api.moonshot.cn/v1"
@@ -795,7 +823,10 @@ func NewKimiProvider(config core.ProviderConfig) Provider {
 	return NewOpenAIProvider(config)
 }
 
-// NewGLMProvider creates a GLM (Zhipu AI) provider with sensible defaults.
+// NewGLMProvider 创建 GLM（智谱 AI）Provider，并设置合理的默认配置。
+// 默认端点：https://open.bigmodel.cn/api/paas/v4
+// 默认模型：glm-5.1
+// 默认名称：glm
 func NewGLMProvider(config core.ProviderConfig) Provider {
 	if config.Endpoint == "" {
 		config.Endpoint = "https://open.bigmodel.cn/api/paas/v4"
@@ -809,7 +840,10 @@ func NewGLMProvider(config core.ProviderConfig) Provider {
 	return NewOpenAIProvider(config)
 }
 
-// NewQwenProvider creates a Qwen (Alibaba Tongyi) provider with sensible defaults.
+// NewQwenProvider 创建 Qwen（阿里巴巴通义千问）Provider，并设置合理的默认配置。
+// 默认端点：https://dashscope.aliyuncs.com/compatible-mode/v1
+// 默认模型：qwen3.7-max
+// 默认名称：qwen
 func NewQwenProvider(config core.ProviderConfig) Provider {
 	if config.Endpoint == "" {
 		config.Endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
