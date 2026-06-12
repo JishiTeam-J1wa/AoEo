@@ -1,3 +1,10 @@
+// pseudonymizer.go 实现请求伪匿名化和响应还原的核心流程。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package privacy
 
 import (
@@ -25,6 +32,14 @@ type Pseudonymizer struct {
 
 // NewPseudonymizer 创建一个新的匿名化处理器。
 // 需要传入三个依赖：映射存储、伪造值生成器和敏感信息检测器。
+//
+// Param:
+//   - store: store.MappingStore - 映射存储后端，保存 fake<->original 的双向映射
+//   - generator: *FakeGenerator - 伪造值生成器，根据标签类型生成逼真的替换值
+//   - detector: Detector - 敏感信息检测器，可以是本地模型或远程 sidecar
+//
+// Return:
+//   - *Pseudonymizer: 初始化完成的匿名化处理器
 func NewPseudonymizer(store store.MappingStore, generator *FakeGenerator, detector Detector) *Pseudonymizer {
 	return &Pseudonymizer{
 		store:     store,
@@ -41,7 +56,15 @@ func NewPseudonymizer(store store.MappingStore, generator *FakeGenerator, detect
 //  4. 将映射持久化到存储后端
 //  5. 在所有消息内容中执行替换
 //
-// 返回替换后的新请求和本次创建的映射列表。
+// Param:
+//   - ctx: context.Context - 请求上下文，用于存储后端操作
+//   - sessionID: string - 会话标识符，用于隔离不同会话的映射
+//   - req: *core.ChatCompletionRequest - 待处理的聊天请求
+//
+// Return:
+//   - *core.ChatCompletionRequest: 替换后的新请求
+//   - []core.PrivacyMapping: 本次创建的映射列表
+//   - error: 存储写入失败时返回错误
 func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID string, req *core.ChatCompletionRequest) (*core.ChatCompletionRequest, []core.PrivacyMapping, error) {
 	// 第一步：使用批量检测 API 扫描所有消息中的敏感信息片段
 	parts := make([]string, len(req.Messages))
@@ -56,7 +79,6 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 		spans = append(spans, dr.Spans...)
 	}
 
-	// 计算文本总长度，用于日志记录
 	totalLen := 0
 	for _, p := range parts {
 		totalLen += len(p)
@@ -104,7 +126,6 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 			fake = p.generator.Generate(span.Label, original)
 		}
 
-		// 将映射持久化到存储后端
 		if err := p.store.Set(ctx, sessionID, fake, original, string(span.Label)); err != nil {
 			return nil, nil, fmt.Errorf("create mapping: %w", err)
 		}
@@ -145,6 +166,15 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 // RestoreResponse 处理 AI 响应，将响应中的伪造值还原为原始值。
 // 从存储后端加载该会话的全部映射关系进行还原。
 // 适用于无法传入精确映射的场景（如历史会话回放）。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，用于存储后端操作
+//   - sessionID: string - 会话标识符
+//   - resp: *core.ChatCompletionResponse - 待还原的 AI 响应
+//
+// Return:
+//   - *core.ChatCompletionResponse: 还原后的响应
+//   - error: 加载映射失败时返回错误
 func (p *Pseudonymizer) RestoreResponse(ctx context.Context, sessionID string, resp *core.ChatCompletionResponse) (*core.ChatCompletionResponse, error) {
 	if resp == nil {
 		return nil, nil
@@ -160,6 +190,16 @@ func (p *Pseudonymizer) RestoreResponse(ctx context.Context, sessionID string, r
 // RestoreResponseWithMappings 使用指定的映射列表还原 AI 响应中的伪造值。
 // 这是首选的还原路径，因为调用者明确知道当前请求创建了哪些映射，
 // 可以避免误还原历史会话中遗留的伪造值（防止"过度还原"问题）。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - sessionID: string - 会话标识符
+//   - resp: *core.ChatCompletionResponse - 待还原的 AI 响应
+//   - mappings: []core.PrivacyMapping - 本次请求创建的精确映射列表
+//
+// Return:
+//   - *core.ChatCompletionResponse: 还原后的响应
+//   - error: 还原失败时返回错误
 func (p *Pseudonymizer) RestoreResponseWithMappings(ctx context.Context, sessionID string, resp *core.ChatCompletionResponse, mappings []core.PrivacyMapping) (*core.ChatCompletionResponse, error) {
 	if resp == nil {
 		return nil, nil
@@ -229,6 +269,11 @@ func (p *Pseudonymizer) restoreWithEntries(ctx context.Context, sessionID string
 // RestoreStreamChunk 在流式响应传输过程中实时还原伪造值。
 // 从存储后端加载该会话的全部映射，对每个流式数据块的内容进行替换。
 // 由于流式场景对性能敏感，如果加载映射失败或为空则直接跳过。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - sessionID: string - 会话标识符
+//   - chunk: *core.StreamCompletionResponse - 当前流式数据块（会被原地替换）
 func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string, chunk *core.StreamCompletionResponse) {
 	if chunk == nil || chunk.Err != nil {
 		return
@@ -239,7 +284,6 @@ func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string
 		return
 	}
 
-	// 按伪造值长度降序排列，确保长值优先替换
 	sort.Slice(entries, func(i, j int) bool {
 		return len(entries[i].Fake) > len(entries[j].Fake)
 	})
@@ -267,7 +311,6 @@ func (p *Pseudonymizer) RestoreStreamChunk(ctx context.Context, sessionID string
 // 先尝试精确匹配替换，再尝试处理 AI 常见的标点符号边界情况
 // （AI 模型经常在生成的值后面添加标点，如句号、逗号等）。
 func replaceFake(text, fake, original string) string {
-	// 精确匹配替换
 	text = strings.ReplaceAll(text, fake, original)
 
 	// 模糊匹配：伪造值后面紧跟常见标点符号的情况

@@ -1,3 +1,10 @@
+// Package core 重试策略与错误分类，提供指数退避重试配置和临时性错误判定。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package core
 
 import (
@@ -14,7 +21,13 @@ type RetryConfig struct {
 }
 
 // Validate 校验重试配置是否合法。
-// 返回错误信息切片，空切片表示配置有效。
+//
+// Return:
+//   - []string: 错误信息切片，空切片表示配置有效
+//
+// Edge Cases:
+//   - BaseDelay 不可大于 MaxDelay（当 MaxDelay > 0 时）
+//   - 所有数值字段须 >= 0
 func (cfg RetryConfig) Validate() []string {
 	var issues []string
 	if cfg.MaxRetries < 0 {
@@ -36,6 +49,11 @@ func (cfg RetryConfig) Validate() []string {
 }
 
 // DefaultRetryConfig 返回一组合理的默认重试配置。
+//
+// 默认值：最大重试 2 次，基础延迟 500ms，最大延迟 5s，退避乘数 2.0。
+//
+// Return:
+//   - RetryConfig: 预填充的默认重试配置
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxRetries: 2,
@@ -62,7 +80,14 @@ var transientPatterns = []string{
 }
 
 // IsRetryableError 判断错误是否为可重试的临时性错误。
-// 通过匹配错误信息中的关键字（如 timeout、503 等）进行判断。
+//
+// 通过匹配错误信息中的关键字（如 timeout、503 等）进行大小写不敏感判断。
+//
+// Param:
+//   - err: error - 待判断的错误，nil 直接返回 false
+//
+// Return:
+//   - bool: true 表示该错误为临时性错误，值得重试
 func IsRetryableError(err error) bool {
 	if err == nil {
 		return false

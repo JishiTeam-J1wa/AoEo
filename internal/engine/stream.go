@@ -1,3 +1,11 @@
+// stream.go 实现流式聊天补全及 SSE（Server-Sent Events）流解析。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
+
 package engine
 
 import (
@@ -11,10 +19,23 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/core"
 )
 
-// ChatCompleteStream performs a streaming chat completion using the primary provider.
-// The caller MUST read from the returned channel until it is closed, or cancel the
-// provided context, to avoid leaking the background goroutine and the semaphore slot.
-// Check chunk.Err to detect stream errors.
+// ChatCompleteStream 使用主 Provider 执行流式聊天补全。
+// 调用方必须持续从返回的 channel 中读取直到其关闭，或取消提供的 context，
+// 否则会导致后台 goroutine 和信号量槽位泄漏。
+// 通过检查 chunk.Err 可检测流式传输中的错误。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，取消后终止流式传输并释放资源
+//   - req: core.ChatCompletionRequest - 聊天补全请求
+//
+// Return:
+//   - <-chan core.StreamCompletionResponse: 流式响应通道，读取完毕或 ctx 取消后自动关闭
+//   - error: 调度器已关闭、无可用 Provider 或信号量获取失败时返回错误
+//
+// Edge Cases:
+//   - 信号量获取失败时返回 error
+//   - 无可用 Provider 时返回 ErrNoAvailableProvider
+//   - Provider 流式调用失败时通过通道的 Err 字段传递错误
 func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -33,7 +54,6 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		reqCopy.Model = p.Config().Model
 	}
 
-	// Apply prompt injection if configured.
 	if pi := s.promptInjector.Load(); pi != nil {
 		reqCopy = req.Clone()
 		if reqCopy.Model == "" {
@@ -42,7 +62,6 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
-	// Apply interceptor BeforeRequest hooks.
 	chain := s.interceptorChain()
 	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
 		s.sem.Release()
@@ -57,9 +76,9 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		return nil, err
 	}
 
-	// Wrap the stream channel so we release the semaphore when consumption finishes.
-	// Use a fixed buffer to decouple producer and consumer, preventing goroutine leaks
-	// when the consumer reads slower than the producer.
+	// 包装流通道：在消费完成后释放信号量槽位。
+	// 使用固定大小缓冲区（wrappedBufSize=16）解耦生产者和消费者，
+	// 防止消费者读取速度慢于生产者时导致 goroutine 泄漏。
 	const wrappedBufSize = 16
 	wrapped := make(chan core.StreamCompletionResponse, wrappedBufSize)
 	go func() {
@@ -110,8 +129,18 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 	return wrapped, nil
 }
 
-// ParseSSE parses a raw Server-Sent Events stream into chunks.
-// Useful for debugging or proxying streams.
+// ParseSSE 解析原始 SSE（Server-Sent Events）数据流，将其转换为 StreamChunk 通道。
+// 适用于调试或代理 SSE 流的场景。
+//
+// Param:
+//   - r: io.Reader - SSE 数据流（通常为 HTTP 响应体）
+//
+// Return:
+//   - <-chan core.StreamChunk: 解析后的数据块通道，流结束或出错后自动关闭
+//
+// Edge Cases:
+//   - 遇到 "[DONE]" 标记时正常关闭通道
+//   - 读取流发生错误时发送包含错误信息的 StreamChunk 后关闭
 func ParseSSE(r io.Reader) <-chan core.StreamChunk {
 	ch := make(chan core.StreamChunk, 8)
 	go func() {
@@ -127,7 +156,7 @@ func ParseSSE(r io.Reader) <-chan core.StreamChunk {
 			if data == "[DONE]" {
 				return
 			}
-			// Minimal parse - users can extend with json.Unmarshal.
+			// 最简解析，用户可自行通过 json.Unmarshal 扩展
 			ch <- core.StreamChunk{
 				Delta: core.Message{Content: data},
 			}

@@ -1,3 +1,11 @@
+// loadbalancer.go 实现多后端负载均衡客户端，支持轮询、随机和最低延迟策略，
+// 内含健康检查、EWMA 延迟跟踪和自动故障转移。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package model
 
 import (
@@ -79,12 +87,29 @@ func WithAutoHealthCheck(auto bool) LoadBalancedClientOption {
 
 // NewLoadBalancedClient 创建一个在给定端点间负载均衡的客户端。
 // 端点参数支持逗号分隔的多地址格式。
+//
+// Param:
+//   - endpoints: string - 逗号分隔的端点地址列表
+//   - strategy: Strategy - 负载均衡策略（RoundRobin、Random、LeastLatency）
+//   - opts: ...HTTPClientOption - HTTP 客户端配置选项
+//
+// Return:
+//   - *LoadBalancedClient: 初始化完成的负载均衡客户端
 func NewLoadBalancedClient(endpoints string, strategy Strategy, opts ...HTTPClientOption) *LoadBalancedClient {
 	return NewLoadBalancedClientWithOptions(endpoints, strategy, opts, nil)
 }
 
 // NewLoadBalancedClientWithOptions 创建具有完整选项控制的负载均衡客户端。
 // 支持 HTTP 客户端选项和负载均衡选项的独立配置。
+//
+// Param:
+//   - endpoints: string - 逗号分隔的端点地址列表
+//   - strategy: Strategy - 负载均衡策略
+//   - httpOpts: []HTTPClientOption - HTTP 客户端配置选项
+//   - lbOpts: []LoadBalancedClientOption - 负载均衡器配置选项
+//
+// Return:
+//   - *LoadBalancedClient: 初始化完成的负载均衡客户端
 func NewLoadBalancedClientWithOptions(endpoints string, strategy Strategy, httpOpts []HTTPClientOption, lbOpts []LoadBalancedClientOption) *LoadBalancedClient {
 	parts := splitEndpoints(endpoints)
 	if len(parts) == 0 {
@@ -125,6 +150,14 @@ func NewLoadBalancedClientWithOptions(endpoints string, strategy Strategy, httpO
 
 // Detect 将文本发送到健康的后端进行检测。
 // 如果选中的后端失败，自动故障转移到下一个健康后端。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，用于超时控制
+//   - text: string - 待检测的文本内容
+//
+// Return:
+//   - []Span: 检测到的敏感信息片段列表
+//   - error: 所有后端均失败时返回最后一次的错误
 func (lb *LoadBalancedClient) Detect(ctx context.Context, text string) ([]Span, error) {
 	order := lb.pickOrder() // 根据策略决定后端的尝试顺序
 	var lastErr error
@@ -153,6 +186,14 @@ func (lb *LoadBalancedClient) Detect(ctx context.Context, text string) ([]Span, 
 // DetectBatch 将一批文本分发到后端进行批量检测。
 // 为简化实现，所有文本发送到同一个后端（由策略选择）。
 // 如果该后端失败，自动故障转移到下一个健康后端。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，用于超时控制
+//   - texts: []string - 待检测的文本列表
+//
+// Return:
+//   - [][]Span: 每段文本对应的检测结果列表
+//   - error: 所有后端均失败时返回最后一次的错误
 func (lb *LoadBalancedClient) DetectBatch(ctx context.Context, texts []string) ([][]Span, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -210,6 +251,13 @@ func (b *backend) updateLatency(d time.Duration) {
 }
 
 // HealthCheck 检查是否至少有一个后端处于健康状态。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文（当前实现未使用，保留以满足接口约定）
+//
+// Return:
+//   - bool: 至少有一个后端健康时返回 true
+//   - error: 当前始终返回 nil
 func (lb *LoadBalancedClient) HealthCheck(ctx context.Context) (bool, error) {
 	for _, b := range lb.backends {
 		if b.healthy.Load() {
@@ -228,6 +276,9 @@ func (lb *LoadBalancedClient) Close() {
 }
 
 // Stats 返回每个后端的运行状态和健康信息。
+//
+// Return:
+//   - []BackendStats: 每个后端的健康状态快照
 func (lb *LoadBalancedClient) Stats() []BackendStats {
 	out := make([]BackendStats, 0, len(lb.backends))
 	for _, b := range lb.backends {

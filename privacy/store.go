@@ -1,3 +1,11 @@
+// store.go 基于 SQLite 的进程内映射存储实现，用于早期版本的兼容保留。
+// 新代码应使用 store/ 子包中的 store.MappingStore 接口及其 Pebble 实现。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package privacy
 
 import (
@@ -9,15 +17,22 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// MappingStore persists original-to-fake mappings in a local SQLite database.
-// It is safe for concurrent use.
+// MappingStore 在本地 SQLite 数据库中持久化 original-to-fake 映射关系。
+// 支持并发安全访问。
 type MappingStore struct {
 	db *sql.DB
 	mu sync.RWMutex
 }
 
-// OpenMappingStore opens (or creates) a SQLite database at the given path.
-// If path is ":memory:", an in-memory database is used (useful for tests).
+// OpenMappingStore 在指定路径打开或创建 SQLite 数据库。
+// 如果路径为 ":memory:"，则使用内存数据库（适用于测试场景）。
+//
+// Param:
+//   - path: string - 数据库文件路径，":memory:" 表示内存数据库
+//
+// Return:
+//   - *MappingStore: 初始化完成的映射存储实例
+//   - error: 数据库打开、连接或迁移失败时返回错误
 func OpenMappingStore(path string) (*MappingStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -33,7 +48,10 @@ func OpenMappingStore(path string) (*MappingStore, error) {
 	return store, nil
 }
 
-// Close closes the underlying database.
+// Close 关闭底层 SQLite 数据库连接，释放文件锁和内存缓存。
+//
+// Return:
+//   - error: 关闭数据库失败时返回错误
 func (s *MappingStore) Close() error {
 	return s.db.Close()
 }
@@ -54,7 +72,7 @@ func (s *MappingStore) migrate() error {
 	return err
 }
 
-// FindFake looks up the fake value for a given original within a session.
+// FindFake 在指定会话中查找原始值对应的伪造值。
 func (s *MappingStore) FindFake(sessionID, original string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -70,8 +88,7 @@ func (s *MappingStore) FindFake(sessionID, original string) (string, bool) {
 	return fake, true
 }
 
-// FindOriginal looks up the original value for a given fake within a session.
-// This is used during response restoration.
+// FindOriginal 在指定会话中查找伪造值对应的原始值，用于响应还原阶段。
 func (s *MappingStore) FindOriginal(sessionID, fake string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -87,7 +104,7 @@ func (s *MappingStore) FindOriginal(sessionID, fake string) (string, bool) {
 	return original, true
 }
 
-// ExistsFake reports whether a fake value already exists in a session.
+// ExistsFake 检查指定会话中是否已存在该伪造值的映射，用于碰撞检测。
 func (s *MappingStore) ExistsFake(sessionID, fake string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -100,7 +117,16 @@ func (s *MappingStore) ExistsFake(sessionID, fake string) bool {
 	return err == nil && count > 0
 }
 
-// Create inserts a new mapping entry.
+// Create 插入一条新的映射记录，包含会话标识、原始值、伪造值、实体类型和创建时间。
+//
+// Param:
+//   - sessionID: string - 会话标识符
+//   - original: string - 原始敏感值
+//   - fake: string - 生成的伪造替换值
+//   - typ: EntityType - 实体类型分类
+//
+// Return:
+//   - error: 数据库写入失败时返回错误
 func (s *MappingStore) Create(sessionID, original, fake string, typ EntityType) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,9 +138,8 @@ func (s *MappingStore) Create(sessionID, original, fake string, typ EntityType) 
 	return err
 }
 
-// GetSessionMappings returns all mappings for a session, ordered by length
-// descending (longest first). This ordering is important for restoration to
-// avoid partial replacements.
+// GetSessionMappings 返回指定会话的全部映射，按伪造值长度降序排列（最长的在前）。
+// 此排序对还原阶段至关重要，可避免短伪造值的部分匹配导致错误还原。
 func (s *MappingStore) GetSessionMappings(sessionID string) ([]MappingEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -143,7 +168,7 @@ func (s *MappingStore) GetSessionMappings(sessionID string) ([]MappingEntry, err
 	return entries, rows.Err()
 }
 
-// Cleanup removes mappings older than the given time.
+// Cleanup 删除创建时间早于指定时刻的过期映射，用于会话生命周期管理。
 func (s *MappingStore) Cleanup(before time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -1,3 +1,10 @@
+// generator.go 为各实体类型生成逼真的伪造数据，确保生成值外观合理但完全虚构。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package privacy
 
 import (
@@ -8,22 +15,33 @@ import (
 	"unicode"
 )
 
-// FakeGenerator produces realistic fake data for each entity type.
-// It guarantees that generated values look plausible while being entirely
-// synthetic.
+// FakeGenerator 为各实体类型生成逼真的伪造数据。
+// 保证生成值外观合理但完全虚构。
 type FakeGenerator struct {
 	rnd *rand.Rand
 	mu  sync.Mutex
 }
 
-// NewFakeGenerator creates a new generator with the given seed.
-// Use a fixed seed for deterministic tests, or time.Now().UnixNano() for
-// production randomness.
+// NewFakeGenerator 使用指定种子创建新的生成器。
+// 测试时使用固定种子以获得确定性结果，生产环境使用 time.Now().UnixNano() 获得随机性。
+//
+// Param:
+//   - seed: int64 - 随机数种子
+//
+// Return:
+//   - *FakeGenerator: 初始化完成的伪造值生成器
 func NewFakeGenerator(seed int64) *FakeGenerator {
 	return &FakeGenerator{rnd: rand.New(rand.NewSource(seed))}
 }
 
-// Generate returns a fake value for the given entity type.
+// Generate 根据实体类型返回对应的伪造值。
+//
+// Param:
+//   - typ: EntityType - 敏感数据的实体类型
+//   - original: string - 原始敏感值，部分类型会据此保持格式一致性
+//
+// Return:
+//   - string: 生成的伪造替换值
 func (g *FakeGenerator) Generate(typ EntityType, original string) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -54,8 +72,8 @@ func (g *FakeGenerator) Generate(typ EntityType, original string) string {
 	}
 }
 
+// fakeIP 生成 RFC1918 私有 IP 地址，避免与真实公网 IP 冲突。
 func (g *FakeGenerator) fakeIP() string {
-	// Generate RFC1918 private IP to avoid collision with real public IPs.
 	switch g.rnd.Intn(3) {
 	case 0:
 		return fmt.Sprintf("10.%d.%d.%d", g.rnd.Intn(256), g.rnd.Intn(256), g.rnd.Intn(256))
@@ -66,8 +84,8 @@ func (g *FakeGenerator) fakeIP() string {
 	}
 }
 
+// fakeDomain 生成伪造域名，保留原始子域名层级和顶级域名。
 func (g *FakeGenerator) fakeDomain(original string) string {
-	// Preserve subdomain depth, replace the meaningful parts.
 	parts := strings.Split(original, ".")
 	if len(parts) >= 2 {
 		suffix := parts[len(parts)-1]
@@ -78,8 +96,8 @@ func (g *FakeGenerator) fakeDomain(original string) string {
 	return fmt.Sprintf("masked-%s.local", g.randomSuffix(6))
 }
 
+// fakeName 根据原始值是否包含 CJK 字符，生成中文或英文伪造姓名。
 func (g *FakeGenerator) fakeName(original string) string {
-	// Detect if the original looks Chinese (has CJK runes).
 	hasCJK := false
 	for _, r := range original {
 		if unicode.Is(unicode.Han, r) {
@@ -93,27 +111,29 @@ func (g *FakeGenerator) fakeName(original string) string {
 	return g.fakeEnglishName()
 }
 
+// fakeChineseName 从常见中文姓名库中随机组合姓氏和名字。
 func (g *FakeGenerator) fakeChineseName() string {
 	surnames := []string{"李", "王", "张", "刘", "陈", "杨", "赵", "黄", "周", "吴", "徐", "孙", "马", "朱", "胡"}
 	names := []string{"伟", "芳", "娜", "敏", "静", "丽", "强", "磊", "军", "洋", "勇", "艳", "杰", "娟", "涛"}
 	return surnames[g.rnd.Intn(len(surnames))] + names[g.rnd.Intn(len(names))]
 }
 
+// fakeEnglishName 从常见英文姓名库中随机组合名和姓。
 func (g *FakeGenerator) fakeEnglishName() string {
 	first := []string{"James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda"}
 	last := []string{"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis"}
 	return first[g.rnd.Intn(len(first))] + " " + last[g.rnd.Intn(len(last))]
 }
 
+// fakePhone 生成伪造电话号码。
+// 如果原始值匹配中国大陆手机号格式（11 位且以 1 开头），则保持该格式。
 func (g *FakeGenerator) fakePhone(original string) string {
-	// If it looks like a Chinese mainland mobile (11 digits starting with 1),
-	// preserve that format.
 	if len(original) == 11 && original[0] == '1' {
 		prefixes := []string{"138", "139", "135", "136", "137", "150", "151", "152", "157", "158", "159", "186", "187", "188"}
 		prefix := prefixes[g.rnd.Intn(len(prefixes))]
 		return prefix + fmt.Sprintf("%08d", g.rnd.Intn(100000000))
 	}
-	// Generic: preserve length, replace all digits.
+	// 通用路径：保持长度不变，替换所有数字字符
 	var b strings.Builder
 	for _, c := range original {
 		if unicode.IsDigit(c) {
@@ -125,8 +145,8 @@ func (g *FakeGenerator) fakePhone(original string) string {
 	return b.String()
 }
 
+// fakeIDCard 生成合法的 18 位中国大陆身份证号码，包含正确的校验位。
 func (g *FakeGenerator) fakeIDCard() string {
-	// Generate a valid 18-digit Chinese ID card number with correct check digit.
 	areas := []string{"110101", "310101", "440106", "500101", "510107", "330106", "420106"}
 	area := areas[g.rnd.Intn(len(areas))]
 	year := 1970 + g.rnd.Intn(40)
@@ -137,8 +157,8 @@ func (g *FakeGenerator) fakeIDCard() string {
 	return base + computeIDCheckDigit(base)
 }
 
+// fakeSecret 生成伪造密钥/令牌，保持原始值的长度和字符类分布。
 func (g *FakeGenerator) fakeSecret(original string) string {
-	// Preserve length and character class distribution.
 	var b strings.Builder
 	for _, c := range original {
 		switch {
@@ -155,6 +175,7 @@ func (g *FakeGenerator) fakeSecret(original string) string {
 	return b.String()
 }
 
+// fakeAddress 生成中国大陆格式的伪造地址。
 func (g *FakeGenerator) fakeAddress() string {
 	cities := []string{"北京市", "上海市", "广州市", "深圳市", "成都市", "杭州市"}
 	districts := []string{"朝阳区", "海淀区", "天河区", "南山区", "武侯区", "西湖区"}
@@ -168,8 +189,8 @@ func (g *FakeGenerator) fakeAddress() string {
 	)
 }
 
+// fakeEmail 生成伪造邮箱地址，尽量保留原始域名部分。
 func (g *FakeGenerator) fakeEmail(original string) string {
-	// Preserve the @domain part if possible.
 	parts := strings.Split(original, "@")
 	if len(parts) == 2 {
 		return fmt.Sprintf("user-%s@%s", g.randomSuffix(6), parts[1])
@@ -177,14 +198,15 @@ func (g *FakeGenerator) fakeEmail(original string) string {
 	return fmt.Sprintf("user-%s@example.com", g.randomSuffix(6))
 }
 
+// fakeURL 生成伪造 URL，保持与原始值相同的协议类型。
 func (g *FakeGenerator) fakeURL(original string) string {
-	// Replace path/query but keep scheme roughly similar.
 	if strings.HasPrefix(original, "https://") {
 		return fmt.Sprintf("https://internal-%s.masked.local/path", g.randomSuffix(6))
 	}
 	return fmt.Sprintf("http://internal-%s.masked.local/path", g.randomSuffix(6))
 }
 
+// fakeDate 生成 YYYY-MM-DD 格式的伪造日期。
 func (g *FakeGenerator) fakeDate() string {
 	year := 1980 + g.rnd.Intn(40)
 	month := 1 + g.rnd.Intn(12)
@@ -192,10 +214,12 @@ func (g *FakeGenerator) fakeDate() string {
 	return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
 }
 
+// genericMask 使用星号遮蔽原始值，保持长度不变。
 func (g *FakeGenerator) genericMask(original string) string {
 	return strings.Repeat("*", len(original))
 }
 
+// randomSuffix 生成指定长度的随机小写字母和数字组合，用于构造唯一标识。
 func (g *FakeGenerator) randomSuffix(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
@@ -205,8 +229,7 @@ func (g *FakeGenerator) randomSuffix(n int) string {
 	return string(b)
 }
 
-// computeIDCheckDigit calculates the last check digit for an 18-digit
-// Chinese ID card number (first 17 digits provided).
+// computeIDCheckDigit 计算 18 位身份证号码的末位校验码（基于前 17 位）。
 func computeIDCheckDigit(base17 string) string {
 	if len(base17) != 17 {
 		return "X"

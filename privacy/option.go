@@ -1,3 +1,10 @@
+// option.go 提供基于环境变量和程序化参数的隐私网关配置入口。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package privacy
 
 import (
@@ -26,6 +33,9 @@ import (
 //	export AOEO_PRIVACY_ENDPOINT=http://opf-1:8000,http://opf-2:8000,http://opf-3:8000
 //	export AOEO_PRIVACY_LB_STRATEGY=leastlatency
 //	client, err := aoeo.NewClient(cfg, privacy.WithPrivacyFilter())
+//
+// Return:
+//   - engine.SchedulerOption: 配置调度器以启用隐私网关的选项函数
 func WithPrivacyFilter() engine.SchedulerOption {
 	return func(s *engine.Scheduler) {
 		if !envBool("AOEO_PRIVACY_ENABLED", false) {
@@ -39,7 +49,6 @@ func WithPrivacyFilter() engine.SchedulerOption {
 			LBStrategy:    parseLBStrategy(envString("AOEO_PRIVACY_LB_STRATEGY", "")),
 		}
 
-		// 根据环境变量解析隐私策略类型
 		policy := envString("AOEO_PRIVACY_POLICY", "pseudonymize")
 		switch strings.ToLower(policy) {
 		case "block":
@@ -68,6 +77,12 @@ func WithPrivacyFilter() engine.SchedulerOption {
 // 使用示例：
 //
 //	client, err := aoeo.NewClient(cfg, privacy.WithPrivacyModel("http://localhost:8080"))
+//
+// Param:
+//   - endpoint: string - AI sidecar 端点 URL 地址
+//
+// Return:
+//   - engine.SchedulerOption: 配置调度器以启用隐私网关的选项函数
 func WithPrivacyModel(endpoint string) engine.SchedulerOption {
 	return func(s *engine.Scheduler) {
 		gw, err := NewGateway(GatewayConfig{
@@ -114,7 +129,7 @@ func parseLBStrategy(s string) model.Strategy {
 	case "leastlatency":
 		return model.LeastLatency
 	default:
-		// 默认策略：集群部署使用 LeastLatency，单端点使用 RoundRobin
+		// 默认策略始终使用 LeastLatency，适用于多端点集群部署场景
 		return model.LeastLatency
 	}
 }

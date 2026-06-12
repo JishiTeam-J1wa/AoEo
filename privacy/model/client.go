@@ -1,30 +1,35 @@
-// Package model provides AI model-based PII detection clients.
-// It supports HTTP/JSON transport to an OpenAI Privacy Filter (OPF) sidecar
-// or compatible proxy service.
+// Package model 提供基于 AI 模型的 PII 检测客户端。
+// 支持通过 HTTP/JSON 协议连接到 OpenAI Privacy Filter (OPF) sidecar
+// 或兼容的代理服务。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package model
 
 import "context"
 
-// Span is the detection result from the AI model.
+// Span 是 AI 模型返回的敏感信息检测结果。
 type Span struct {
-	Label       string  `json:"label"`       // e.g. "person", "phone", "email", "secret"
-	Text        string  `json:"text"`        // detected original text
-	Start       int     `json:"start"`       // start index in original text
-	End         int     `json:"end"`         // end index in original text
-	Score       float64 `json:"score"`       // confidence 0.0~1.0
-	Placeholder string  `json:"placeholder"` // OPF replacement placeholder, e.g. "[NAME]"
+	Label       string  `json:"label"`       // 实体类型，如 "person"、"phone"、"email"、"secret"
+	Text        string  `json:"text"`        // 检测到的原始文本
+	Start       int     `json:"start"`       // 在原始文本中的起始索引
+	End         int     `json:"end"`         // 在原始文本中的结束索引
+	Score       float64 `json:"score"`       // 置信度，范围 0.0~1.0
+	Placeholder string  `json:"placeholder"` // OPF 替换占位符，如 "[NAME]"
 }
 
-// Client is the interface for AI privacy filter sidecars.
+// Client 是 AI 隐私过滤 sidecar 的抽象客户端接口。
 type Client interface {
-	// Detect sends text to the model and returns detected spans.
+	// Detect 发送单段文本到模型进行检测，返回检测到的敏感信息片段。
 	Detect(ctx context.Context, text string) ([]Span, error)
 
-	// DetectBatch sends multiple texts in a single request and returns
-	// detected spans for each text. This reduces round-trips for multi-message
-	// requests.
+	// DetectBatch 在单次请求中发送多段文本进行批量检测，
+	// 返回每段文本对应的检测结果，减少多消息请求的往返次数。
 	DetectBatch(ctx context.Context, texts []string) ([][]Span, error)
 
-	// HealthCheck returns true if the sidecar is ready.
+	// HealthCheck 检查 sidecar 是否已就绪，就绪时返回 true。
 	HealthCheck(ctx context.Context) (bool, error)
 }

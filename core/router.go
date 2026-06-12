@@ -1,3 +1,10 @@
+// Package core 请求路由策略，提供多种 Provider 选择算法（轮询、随机、加权等）。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package core
 
 import (
@@ -25,7 +32,15 @@ type SingleProviderRouter struct {
 }
 
 // Select 从候选列表中查找与指定名称匹配且可用的 Provider。
-// 如果找不到，返回包含 Provider 名称的错误信息。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - int: 匹配 Provider 在候选列表中的索引
+//   - error: 找不到或不可用时返回包含 Provider 名称的错误
 func (r *SingleProviderRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	for i, c := range candidates {
 		if c.Name == r.Name && c.Available {
@@ -36,6 +51,15 @@ func (r *SingleProviderRouter) Select(ctx context.Context, candidates []Provider
 }
 
 // SelectSequence 返回仅包含目标 Provider 索引的单元素序列。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求
+//
+// Return:
+//   - []int: 单元素索引切片
+//   - error: 目标 Provider 不可用时返回
 func (r *SingleProviderRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	idx, err := r.Select(ctx, candidates, req)
 	if err != nil {
@@ -61,6 +85,15 @@ type Router interface {
 type PrimaryRouter struct{}
 
 // Select 返回第一个可用 Provider 的索引。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - int: 第一个可用 Provider 的索引
+//   - error: 无可用 Provider 时返回
 func (r *PrimaryRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	for i, c := range candidates {
 		if c.Available {
@@ -71,6 +104,15 @@ func (r *PrimaryRouter) Select(ctx context.Context, candidates []ProviderStatus,
 }
 
 // SelectSequence 返回所有可用 Provider 的索引序列，按原始顺序排列。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - []int: 按原始顺序排列的可用 Provider 索引切片
+//   - error: 无可用 Provider 时返回
 func (r *PrimaryRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	var seq []int
 	for i, c := range candidates {
@@ -91,6 +133,15 @@ type RoundRobinRouter struct {
 }
 
 // Select 使用原子计数器轮询选择下一个可用 Provider。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - int: 轮询选中的 Provider 索引
+//   - error: 无可用 Provider 时返回
 func (r *RoundRobinRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	avail := make([]int, 0, len(candidates))
 	for i, c := range candidates {
@@ -106,6 +157,15 @@ func (r *RoundRobinRouter) Select(ctx context.Context, candidates []ProviderStat
 }
 
 // SelectSequence 返回所有可用 Provider 的索引序列，起始点随计数器轮转。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - []int: 轮转起始点的可用 Provider 索引切片
+//   - error: 无可用 Provider 时返回
 func (r *RoundRobinRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	var seq []int
 	for i, c := range candidates {
@@ -133,6 +193,15 @@ func (r *RoundRobinRouter) SelectSequence(ctx context.Context, candidates []Prov
 type RandomRouter struct{}
 
 // Select 使用 math/rand/v2 随机选择一个可用 Provider。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - int: 随机选中的 Provider 索引
+//   - error: 无可用 Provider 时返回
 func (r *RandomRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	var avail []int
 	for i, c := range candidates {
@@ -147,6 +216,15 @@ func (r *RandomRouter) Select(ctx context.Context, candidates []ProviderStatus, 
 }
 
 // SelectSequence 返回所有可用 Provider 的随机排列序列，用于降级重试。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - []int: Fisher-Yates 洗牌后的可用 Provider 索引切片
+//   - error: 无可用 Provider 时返回
 func (r *RandomRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	var seq []int
 	for i, c := range candidates {
@@ -191,6 +269,17 @@ func (r *WeightedRouter) score(status ProviderStatus) float64 {
 }
 
 // Select 按加权评分随机选择一个可用 Provider，权重越高被选中概率越大。
+//
+// 使用黄金比例常数改善确定性计数器在多个 Provider 间的分布均匀性。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - int: 加权随机选中的 Provider 索引
+//   - error: 无可用 Provider 时返回
 func (r *WeightedRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
 	type scored struct {
 		idx    int
@@ -230,6 +319,15 @@ func (r *WeightedRouter) Select(ctx context.Context, candidates []ProviderStatus
 }
 
 // SelectSequence 返回按评分降序排列的可用 Provider 索引序列，用于降级重试。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - candidates: []ProviderStatus - 候选 Provider 状态列表
+//   - req: ChatCompletionRequest - 当前请求（此实现中未使用）
+//
+// Return:
+//   - []int: 按评分从高到低排列的 Provider 索引切片
+//   - error: 无可用 Provider 时返回
 func (r *WeightedRouter) SelectSequence(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) ([]int, error) {
 	type scored struct {
 		idx   int

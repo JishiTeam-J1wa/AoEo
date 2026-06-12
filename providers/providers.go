@@ -1,3 +1,10 @@
+// Package providers 实现 AI 服务提供商适配层，支持 OpenAI、Anthropic 等多家 API。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package providers
 
 import (
@@ -20,25 +27,25 @@ import (
 // 每个 Provider 封装了与特定 AI 服务（如 DeepSeek、Kimi、GLM 等）的通信逻辑，
 // 支持同步/流式聊天补全、健康检查、模型列表查询等功能。
 type Provider interface {
-	// Name 返回 Provider 的唯一标识名称
+	// Name 返回 Provider 的唯一标识名称。
 	Name() string
-	// Config 返回 Provider 的当前配置
+	// Config 返回 Provider 的当前配置。
 	Config() core.ProviderConfig
-	// ChatComplete 执行同步聊天补全请求
+	// ChatComplete 执行同步聊天补全请求。
 	ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error)
-	// ChatCompleteStream 执行流式聊天补全请求，返回一个接收流式响应的 channel
+	// ChatCompleteStream 执行流式聊天补全请求，返回一个接收流式响应的 channel。
 	ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error)
-	// IsAvailable 返回 Provider 是否可用（配置完整且未处于熔断冷却期）
+	// IsAvailable 返回 Provider 是否可用（配置完整且未处于熔断冷却期）。
 	IsAvailable() bool
-	// ListModels 查询该 Provider 支持的所有可用模型
+	// ListModels 查询该 Provider 支持的所有可用模型。
 	ListModels(ctx context.Context) ([]core.ModelInfo, error)
-	// SetEmitter 设置事件发射器，用于 Provider 生命周期事件通知
+	// SetEmitter 设置事件发射器，用于 Provider 生命周期事件通知。
 	SetEmitter(e core.EventEmitter)
-	// HealthCheck 执行轻量级的连通性检查
+	// HealthCheck 执行轻量级的连通性检查。
 	HealthCheck(ctx context.Context) error
 }
 
-// healthEntry is a single observation in the sliding window.
+// healthEntry 是滑动窗口中的单条观测记录。
 type healthEntry struct {
 	latencyMs int64
 	success   bool
@@ -75,12 +82,18 @@ type BaseProvider struct {
 	healthLatest atomic.Pointer[core.ProviderHealth]
 }
 
-// emitterBox wraps an EventEmitter so atomic.Value stores a consistently-typed pointer.
+// emitterBox 封装 EventEmitter，使 atomic.Value 存储类型一致的指针。
 type emitterBox struct {
 	em core.EventEmitter
 }
 
-// NewBaseProvider creates a BaseProvider with the given config.
+// NewBaseProvider 创建一个带有指定配置的 BaseProvider。
+//
+// Param:
+//   - config: core.ProviderConfig - Provider 配置
+//
+// Return:
+//   - *BaseProvider: 初始化完成的 BaseProvider 实例
 func NewBaseProvider(config core.ProviderConfig) *BaseProvider {
 	bp := &BaseProvider{config: config}
 	bp.emitter.Store(&emitterBox{em: core.NopEmitter{}})
@@ -88,17 +101,28 @@ func NewBaseProvider(config core.ProviderConfig) *BaseProvider {
 	return bp
 }
 
-// RecordHealthCheck records the result of a health-check probe.
+// RecordHealthCheck 记录一次健康检查探测的结果。
+//
+// Param:
+//   - latencyMs: int64 - 探测延迟（毫秒）
+//   - success: bool - 探测是否成功
 func (b *BaseProvider) RecordHealthCheck(latencyMs int64, success bool) {
 	b.pushHealthEntry(healthEntry{latencyMs: latencyMs, success: success, timestamp: time.Now()})
 }
 
-// RecordCallResult records the result of an actual API call.
+// RecordCallResult 记录一次实际 API 调用的结果。
+//
+// Param:
+//   - latencyMs: int64 - 调用延迟（毫秒）
+//   - err: error - 调用错误（nil 表示成功）
 func (b *BaseProvider) RecordCallResult(latencyMs int64, err error) {
 	b.pushHealthEntry(healthEntry{latencyMs: latencyMs, success: err == nil, timestamp: time.Now()})
 }
 
-// Health returns the current runtime health snapshot.
+// Health 返回当前运行时健康状态快照。
+//
+// Return:
+//   - core.ProviderHealth: 当前健康状态（含延迟、成功率等指标）
 func (b *BaseProvider) Health() core.ProviderHealth {
 	if h := b.healthLatest.Load(); h != nil {
 		return *h
@@ -106,7 +130,7 @@ func (b *BaseProvider) Health() core.ProviderHealth {
 	return core.ProviderHealth{}
 }
 
-// pushHealthEntry adds an entry to the sliding window and recomputes the snapshot.
+// pushHealthEntry 将一条记录添加到滑动窗口并重新计算健康快照。
 func (b *BaseProvider) pushHealthEntry(entry healthEntry) {
 	b.healthMu.Lock()
 	defer b.healthMu.Unlock()
@@ -117,7 +141,7 @@ func (b *BaseProvider) pushHealthEntry(entry healthEntry) {
 		b.healthCount++
 	}
 
-	// Recompute aggregated metrics from the window.
+	// 从滑动窗口重新计算聚合指标。
 	var totalLatency int64
 	var successCount int
 	var consecutiveFails int
@@ -158,7 +182,10 @@ func (b *BaseProvider) Config() core.ProviderConfig {
 	return b.config
 }
 
-// SetEmitter attaches an event emitter to the provider.
+// SetEmitter 设置事件发射器。当传入 nil 时使用空操作发射器。
+//
+// Param:
+//   - e: core.EventEmitter - 事件发射器实例，nil 表示使用空操作发射器
 func (b *BaseProvider) SetEmitter(e core.EventEmitter) {
 	if e == nil {
 		b.emitter.Store(&emitterBox{em: core.NopEmitter{}})
@@ -174,7 +201,7 @@ func (b *BaseProvider) getEmitter() core.EventEmitter {
 	return core.NopEmitter{}
 }
 
-// RecordSuccess resets the failure counter on a successful call.
+// RecordSuccess 在调用成功时重置失败计数器。
 func (b *BaseProvider) RecordSuccess() {
 	wasFailed := b.failCount.Load() > 0
 	b.failCount.Store(0)
@@ -185,7 +212,7 @@ func (b *BaseProvider) RecordSuccess() {
 	}
 }
 
-// RecordFailure increments the failure counter and triggers cooldown after MaxFailures consecutive failures.
+// RecordFailure 递增失败计数器，当连续失败次数达到 MaxFailures 时触发熔断冷却。
 func (b *BaseProvider) RecordFailure() {
 	count := b.failCount.Add(1)
 	maxFailures := b.config.MaxFailures
@@ -216,8 +243,10 @@ func (b *BaseProvider) RecordFailure() {
 	}
 }
 
-// IsAvailable returns true if the provider has the minimum required config
-// and is not in circuit-breaker cooldown.
+// IsAvailable 返回 Provider 是否具备最低配置要求且未处于熔断冷却期。
+//
+// Return:
+//   - bool: true 表示可用，false 表示配置不完整或处于冷却期
 func (b *BaseProvider) IsAvailable() bool {
 	if b.config.APIKey == "" || b.config.Endpoint == "" || b.config.Model == "" {
 		return false
@@ -229,9 +258,15 @@ func (b *BaseProvider) IsAvailable() bool {
 	return time.Now().UnixNano() >= until
 }
 
-// HealthCheck performs a lightweight connectivity check to the provider endpoint.
-// It uses a 5-second timeout and does a simple HTTP GET to the base URL.
-// The latency and result are recorded in the provider's health window.
+// HealthCheck 执行轻量级的连通性检查。
+// 使用 5 秒超时，对 Provider 端点的基础 URL 发起 HTTP GET 请求。
+// 延迟和结果会记录到 Provider 的健康窗口中。
+//
+// Param:
+//   - ctx: context.Context - 调用上下文
+//
+// Return:
+//   - error: 检查失败或配置不完整时返回错误
 func (b *BaseProvider) HealthCheck(ctx context.Context) error {
 	if b.config.APIKey == "" || b.config.Endpoint == "" {
 		b.RecordHealthCheck(0, false)
@@ -270,9 +305,15 @@ func (b *BaseProvider) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// ListModels fetches the list of available models from the provider via the
-// OpenAI-compatible /models endpoint.
-// Note: this creates a temporary client; for connection reuse, use OpenAIProvider.ListModels.
+// ListModels 通过 OpenAI 兼容的 /models 端点查询该 Provider 支持的可用模型列表。
+// 注意：此方法会创建临时客户端；如需连接复用，请使用 OpenAIProvider.ListModels。
+//
+// Param:
+//   - ctx: context.Context - 调用上下文
+//
+// Return:
+//   - []core.ModelInfo: 可用模型信息列表
+//   - error: 查询失败或配置不完整时返回错误
 func (b *BaseProvider) ListModels(ctx context.Context) ([]core.ModelInfo, error) {
 	if b.config.APIKey == "" || b.config.Endpoint == "" {
 		return nil, fmt.Errorf("provider %s config incomplete", b.config.Name)
@@ -296,17 +337,23 @@ func (b *BaseProvider) ListModels(ctx context.Context) ([]core.ModelInfo, error)
 	return result, nil
 }
 
-// SetSystemPrompt sets an override system prompt for the next completion call.
+// SetSystemPrompt 设置覆盖系统 Prompt，将在下次补全调用时生效。
+//
+// Param:
+//   - prompt: string - 系统 Prompt 内容
 func (b *BaseProvider) SetSystemPrompt(prompt string) {
 	b.sysPrompt.Store(&prompt)
 }
 
-// ClearSystemPrompt removes the system prompt override.
+// ClearSystemPrompt 移除系统 Prompt 覆盖。
 func (b *BaseProvider) ClearSystemPrompt() {
 	b.sysPrompt.Store(nil)
 }
 
-// GetSystemPrompt returns the override if set, otherwise empty.
+// GetSystemPrompt 返回已设置的系统 Prompt 覆盖，未设置时返回空字符串。
+//
+// Return:
+//   - string: 系统 Prompt 覆盖内容，未设置时返回 ""
 func (b *BaseProvider) GetSystemPrompt() string {
 	if ptr := b.sysPrompt.Load(); ptr != nil {
 		return *ptr
@@ -314,8 +361,8 @@ func (b *BaseProvider) GetSystemPrompt() string {
 	return ""
 }
 
-// ChatCompleteStream provides a default implementation that returns an error.
-// Providers that support streaming should override this method.
+// ChatCompleteStream 提供默认实现，返回不支持流式的错误。
+// 支持流式的 Provider 应覆盖此方法。
 func (b *BaseProvider) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
 	return nil, fmt.Errorf("provider %s does not support streaming", b.config.Name)
 }
@@ -345,7 +392,7 @@ func NewOpenAIProvider(config core.ProviderConfig) *OpenAIProvider {
 	oc := openai.DefaultConfig(config.APIKey)
 	oc.BaseURL = config.Endpoint
 
-	// Build the final HTTP client with support for custom HTTPClient, Proxy, and SkipTLSVerify.
+	// 构建最终的 HTTP 客户端，支持自定义 HTTPClient、代理和跳过 TLS 验证。
 	oc.HTTPClient = buildHTTPClient(config)
 
 	return &OpenAIProvider{
@@ -354,11 +401,11 @@ func NewOpenAIProvider(config core.ProviderConfig) *OpenAIProvider {
 	}
 }
 
-// buildHTTPClient assembles an *http.Client from ProviderConfig fields.
-// Priority: custom HTTPClient transport > DefaultTransport, then applies Proxy and SkipTLSVerify.
-// When a custom HTTPClient is provided, its CheckRedirect and Jar are preserved.
+// buildHTTPClient 根据 ProviderConfig 字段组装 *http.Client。
+// 优先级：自定义 HTTPClient transport > DefaultTransport，然后应用 Proxy 和 SkipTLSVerify。
+// 当提供了自定义 HTTPClient 时，保留其 CheckRedirect 和 Jar。
 func buildHTTPClient(config core.ProviderConfig) *http.Client {
-	// Fast path: no modifications needed.
+	// 快速路径：无需修改。
 	if config.Proxy == "" && !config.SkipTLSVerify {
 		if config.HTTPClient != nil {
 			return config.HTTPClient
@@ -366,7 +413,7 @@ func buildHTTPClient(config core.ProviderConfig) *http.Client {
 		return &http.Client{Timeout: 120 * time.Second}
 	}
 
-	// Slow path: need to build a transport with Proxy and/or TLS overrides.
+	// 慢速路径：需要构建带有 Proxy 和/或 TLS 覆盖的 transport。
 	var base *http.Client
 	if config.HTTPClient != nil {
 		base = config.HTTPClient
@@ -382,7 +429,7 @@ func buildHTTPClient(config core.ProviderConfig) *http.Client {
 
 	transport := deriveTransport(base)
 
-	// Apply proxy if configured.
+	// 如果配置了代理，则应用代理设置。
 	if config.Proxy != "" {
 		proxyURL, err := url.Parse(config.Proxy)
 		if err == nil {
@@ -390,7 +437,7 @@ func buildHTTPClient(config core.ProviderConfig) *http.Client {
 		}
 	}
 
-	// Apply TLS skip verify if configured.
+	// 如果配置了跳过 TLS 验证，则应用 TLS 设置。
 	if config.SkipTLSVerify {
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{}
@@ -409,10 +456,10 @@ func buildHTTPClient(config core.ProviderConfig) *http.Client {
 	return client
 }
 
-// deriveTransport returns a cloneable *http.Transport from the given client,
-// falling back to http.DefaultTransport if the client's transport is not cloneable.
-// The returned transport always respects HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars
-// unless an explicit Proxy was already configured by the caller.
+// deriveTransport 从给定的客户端返回可克隆的 *http.Transport，
+// 如果客户端的 transport 不可克隆则回退到 http.DefaultTransport。
+// 返回的 transport 始终遵循 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量，
+// 除非调用方已显式配置了 Proxy。
 func deriveTransport(base *http.Client) *http.Transport {
 	if base != nil && base.Transport != nil {
 		if t, ok := base.Transport.(*http.Transport); ok {
@@ -422,7 +469,7 @@ func deriveTransport(base *http.Client) *http.Transport {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		return t.Clone()
 	}
-	// Fallback: create a minimal transport that still respects standard proxy env vars.
+	// 回退：创建最小化的 transport，仍然遵循标准代理环境变量。
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 	}
@@ -430,8 +477,8 @@ func deriveTransport(base *http.Client) *http.Transport {
 
 func (p *OpenAIProvider) Name() string { return p.Config().Name }
 
-// buildOpenAIMessages converts core.Message slice to go-openai messages,
-// preserving tool calls, tool call IDs, and function names.
+// buildOpenAIMessages 将 core.Message 切片转换为 go-openai 消息格式，
+// 保留工具调用、工具调用 ID 和函数名称。
 func buildOpenAIMessages(messages []core.Message) []openai.ChatCompletionMessage {
 	result := make([]openai.ChatCompletionMessage, len(messages))
 	for i, m := range messages {
@@ -462,7 +509,7 @@ func buildOpenAIMessages(messages []core.Message) []openai.ChatCompletionMessage
 	return result
 }
 
-// buildOpenAITools converts core.Tool slice to go-openai tools.
+// buildOpenAITools 将 core.Tool 切片转换为 go-openai 工具格式。
 func buildOpenAITools(tools []core.Tool) []openai.Tool {
 	if len(tools) == 0 {
 		return nil
@@ -482,7 +529,7 @@ func buildOpenAITools(tools []core.Tool) []openai.Tool {
 	return result
 }
 
-// buildOpenAIToolChoice converts a core tool choice value to go-openai format.
+// buildOpenAIToolChoice 将 core 工具选择值转换为 go-openai 格式。
 func buildOpenAIToolChoice(choice any) any {
 	if choice == nil {
 		return nil
@@ -501,7 +548,7 @@ func buildOpenAIToolChoice(choice any) any {
 	return choice
 }
 
-// buildCoreChoice converts a go-openai choice to core.Choice, preserving tool calls.
+// buildCoreChoice 将 go-openai 选择转换为 core.Choice，保留工具调用信息。
 func buildCoreChoice(choice openai.ChatCompletionChoice) core.Choice {
 	msg := core.Message{
 		Role:    choice.Message.Role,
@@ -534,7 +581,7 @@ func buildCoreChoice(choice openai.ChatCompletionChoice) core.Choice {
 	}
 }
 
-// buildStreamDelta converts a go-openai stream delta to core.Message, preserving tool calls.
+// buildStreamDelta 将 go-openai 流式增量转换为 core.Message，保留工具调用信息。
 func buildStreamDelta(delta openai.ChatCompletionStreamChoiceDelta) core.Message {
 	msg := core.Message{
 		Role:    delta.Role,
@@ -559,11 +606,20 @@ func buildStreamDelta(delta openai.ChatCompletionStreamChoiceDelta) core.Message
 	return msg
 }
 
-// ChatCompleteStream performs a streaming chat completion.
+// ChatCompleteStream 执行流式聊天补全请求。
+// 通过 channel 逐块返回响应，支持上下文取消。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - req: core.ChatCompletionRequest - 聊天补全请求
+//
+// Return:
+//   - <-chan core.StreamCompletionResponse: 接收流式响应的 channel
+//   - error: 请求失败时返回错误
 func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
 	messages := buildOpenAIMessages(req.Messages)
 
-	// Inject system prompt override if set.
+	// 如果设置了系统 Prompt 覆盖，则注入到消息列表头部。
 	if sys := p.GetSystemPrompt(); sys != "" {
 		messages = append([]openai.ChatCompletionMessage{{
 			Role:    openai.ChatMessageRoleSystem,
@@ -670,6 +726,24 @@ func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCo
 	return ch, nil
 }
 
+// ChatComplete 执行同步聊天补全请求，带 panic 恢复、熔断器管理和健康指标追踪。
+//
+// 执行流程：
+//  1. 记录开始时间，设置 defer 函数处理 panic 恢复和指标记录
+//  2. 将 core.Message 转换为 go-openai 消息格式
+//  3. 注入系统 Prompt 覆盖（如果已设置）
+//  4. 构建 OpenAI 请求参数
+//  5. 调用 OpenAI API
+//  6. 如遇 temperature 兼容错误则自动重试（部分模型仅接受 temperature=1）
+//  7. 将 go-openai 响应转换为 core.ChatCompletionResponse
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - req: core.ChatCompletionRequest - 聊天补全请求
+//
+// Return:
+//   - *core.ChatCompletionResponse: 聊天补全响应
+//   - error: 请求失败、响应无选项或发生 panic 时返回错误
 func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (result *core.ChatCompletionResponse, err error) {
 	start := time.Now()
 	defer func() {
@@ -694,7 +768,7 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 
 	messages := buildOpenAIMessages(req.Messages)
 
-	// Inject system prompt override if set.
+	// 如果设置了系统 Prompt 覆盖，则注入到消息列表头部。
 	if sys := p.GetSystemPrompt(); sys != "" {
 		messages = append([]openai.ChatCompletionMessage{{
 			Role:    openai.ChatMessageRoleSystem,
@@ -727,8 +801,8 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 	}
 	resp, err := p.Client.CreateChatCompletion(ctx, streamReq)
 	if err != nil {
-		// Compatibility retry: some providers (e.g. Kimi kimi-k2.6) only accept temperature=1.
-		// If error mentions temperature, retry without setting it (omitted field defaults to 1).
+		// 兼容性重试：部分提供商（如 Kimi kimi-k2.6）仅接受 temperature=1。
+		// 如果错误消息包含 temperature 关键字，则在不设置 temperature 的情况下重试（omitempty 会将其忽略）。
 		if isTemperatureError(err) && req.Temperature != 1 {
 			streamReq.Temperature = 0 // omitempty will drop it
 			resp, err = p.Client.CreateChatCompletion(ctx, streamReq)
@@ -761,6 +835,12 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 // isTemperatureError 检查错误消息中是否包含 "temperature" 关键字。
 // 部分模型提供商（如 Kimi kimi-k2.6）仅接受 temperature=1，
 // 当返回 temperature 相关错误时，调度器会自动重试并将 temperature 设为 0（omitempty 会将其忽略）。
+//
+// Param:
+//   - err: error - 待检查的错误
+//
+// Return:
+//   - bool: true 表示错误与 temperature 兼容性相关
 func isTemperatureError(err error) bool {
 	if err == nil {
 		return false
@@ -769,6 +849,15 @@ func isTemperatureError(err error) bool {
 	return strings.Contains(msg, "temperature")
 }
 
+// ListModels 通过 OpenAI 兼容的 /models 端点查询该 Provider 支持的可用模型列表。
+// 复用 OpenAIProvider 内部的 Client 实例以实现连接复用。
+//
+// Param:
+//   - ctx: context.Context - 调用上下文
+//
+// Return:
+//   - []core.ModelInfo: 可用模型信息列表
+//   - error: 查询失败或配置不完整时返回错误
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]core.ModelInfo, error) {
 	if p.Config().APIKey == "" || p.Config().Endpoint == "" {
 		return nil, fmt.Errorf("provider %s config incomplete", p.Config().Name)
@@ -857,11 +946,17 @@ func NewQwenProvider(config core.ProviderConfig) Provider {
 	return NewOpenAIProvider(config)
 }
 
-// Close releases any resources held by the provider.
-// The default implementation is a no-op; override in concrete providers if needed.
+// Close 释放 Provider 持有的资源。
+// 默认实现为空操作；具体 Provider 可按需覆盖。
+//
+// Return:
+//   - error: 释放资源失败时返回错误
 func (b *BaseProvider) Close() error { return nil }
 
-// FailUntil returns the circuit breaker cooldown deadline (zero if not active).
+// FailUntil 返回熔断器冷却截止时间。
+//
+// Return:
+//   - time.Time: 冷却截止时间，零值表示未处于冷却期
 func (b *BaseProvider) FailUntil() time.Time {
 	if until := b.failUntil.Load(); until != 0 {
 		return time.Unix(0, until)
@@ -869,7 +964,10 @@ func (b *BaseProvider) FailUntil() time.Time {
 	return time.Time{}
 }
 
-// SetFailUntil sets the circuit breaker cooldown deadline (for testing).
+// SetFailUntil 设置熔断器冷却截止时间（主要用于测试）。
+//
+// Param:
+//   - t: time.Time - 冷却截止时间，零值表示清除冷却期
 func (b *BaseProvider) SetFailUntil(t time.Time) {
 	if t.IsZero() {
 		b.failUntil.Store(0)

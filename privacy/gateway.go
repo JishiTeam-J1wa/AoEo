@@ -1,3 +1,10 @@
+// Package privacy 实现隐私网关，提供 PII 检测、伪匿名化和还原能力。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package privacy
 
 import (
@@ -79,6 +86,13 @@ type Stats struct {
 
 // NewGateway 创建一个新的隐私网关实例。
 // 根据配置初始化存储后端、伪造值生成器、检测器和负载均衡客户端。
+//
+// Param:
+//   - cfg: GatewayConfig - 网关配置，包含存储、生成器、检测器、策略等参数
+//
+// Return:
+//   - *Gateway: 初始化完成的隐私网关实例
+//   - error: 存储后端打开失败或配置无效时返回错误
 func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	mappingStore := cfg.Store
 	if mappingStore == nil {
@@ -126,6 +140,9 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 
 // Close 释放网关持有的所有资源。
 // 包括停止后台健康检查协程和关闭存储后端。
+//
+// Return:
+//   - error: 关闭存储后端失败时返回错误
 func (g *Gateway) Close() error {
 	// 如果使用 LoadBalancedClient，停止后台健康检查协程
 	if g.modelClient != nil {
@@ -141,6 +158,12 @@ func (g *Gateway) Close() error {
 
 // HealthCheck 向 AI sidecar 发送健康检查请求以验证其可达性。
 // 如果至少有一个后端返回 HTTP 200，则返回 true。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，用于控制超时
+//
+// Return:
+//   - bool: 至少一个后端可达时返回 true
 func (g *Gateway) HealthCheck(ctx context.Context) bool {
 	if g.modelClient != nil {
 		ok, err := g.modelClient.HealthCheck(ctx)
@@ -168,14 +191,24 @@ func (g *Gateway) HealthCheck(ctx context.Context) bool {
 	return ok
 }
 
-// Stats 返回隐私网关的运行时统计信息快照。
-func (g *Gateway) Stats() Stats {
-	return g.stats
+// Stats 返回隐私网关的运行时统计信息快照（指针引用，避免 atomic 值拷贝）。
+//
+// Return:
+//   - *Stats: 统计信息结构指针，包含请求数、检测片段数等原子计数器
+func (g *Gateway) Stats() *Stats {
+	return &g.stats
 }
 
 // BeforeRequest 实现 core.Interceptor 接口。
 // 在请求发出之前，将请求中的敏感值替换为伪造的等价值。
 // 本次请求创建的映射会通过请求元数据传递给 AfterResponse。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，可携带会话标识符
+//   - req: *core.ChatCompletionRequest - 待处理的聊天请求（会被原地替换）
+//
+// Return:
+//   - error: 处理失败时返回错误；若 FailOpen 为 true 则返回 nil 并记录警告
 func (g *Gateway) BeforeRequest(ctx context.Context, req *core.ChatCompletionRequest) error {
 	sessionID := extractSessionID(ctx, req)
 
@@ -211,6 +244,16 @@ func (g *Gateway) BeforeRequest(ctx context.Context, req *core.ChatCompletionReq
 // AfterResponse 实现 core.Interceptor 接口。
 // 将 AI 响应中的伪造值还原为原始值。
 // 优先使用 BeforeRequest 阶段传递的精确映射，回退到全量会话映射。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，可携带会话标识符
+//   - req: core.ChatCompletionRequest - 原始聊天请求（含元数据中的映射信息）
+//   - resp: *core.ChatCompletionResponse - AI 返回的响应
+//   - err: error - 上游处理过程中产生的错误
+//
+// Return:
+//   - *core.ChatCompletionResponse: 还原后的响应
+//   - error: 还原失败时返回错误；若 FailOpen 为 true 则返回原始响应
 func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequest, resp *core.ChatCompletionResponse, err error) (*core.ChatCompletionResponse, error) {
 	if err != nil || resp == nil {
 		return resp, err
@@ -255,6 +298,14 @@ func (g *Gateway) AfterResponse(ctx context.Context, req core.ChatCompletionRequ
 
 // AfterStreamChunk 实现 core.Interceptor 接口。
 // 在流式响应传输过程中实时还原伪造值。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，可携带会话标识符
+//   - req: core.ChatCompletionRequest - 原始聊天请求
+//   - chunk: *core.StreamChunk - 当前流式数据块（会被原地替换）
+//
+// Return:
+//   - error: 当前始终返回 nil
 func (g *Gateway) AfterStreamChunk(ctx context.Context, req core.ChatCompletionRequest, chunk *core.StreamChunk) error {
 	sessionID := extractSessionID(ctx, &req)
 
@@ -268,12 +319,23 @@ func (g *Gateway) AfterStreamChunk(ctx context.Context, req core.ChatCompletionR
 
 // AfterStreamDone 实现 core.Interceptor 接口。
 // 在流式会话结束后执行清理操作（预留接口，未来可用于审计日志、会话清理等）。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - req: core.ChatCompletionRequest - 原始聊天请求
+//   - err: error - 流式传输过程中产生的错误
+//
+// Return:
+//   - error: 当前始终返回 nil
 func (g *Gateway) AfterStreamDone(ctx context.Context, req core.ChatCompletionRequest, err error) error {
 	// 预留：审计日志、会话清理等功能
 	return nil
 }
 
 // ToInterceptor 将网关转换为 core.Interceptor，用于 AoEo 调度器的选项配置。
+//
+// Return:
+//   - core.Interceptor: 包含所有拦截器回调的聚合结构体
 func (g *Gateway) ToInterceptor() core.Interceptor {
 	return core.Interceptor{
 		BeforeRequest:    g.BeforeRequest,

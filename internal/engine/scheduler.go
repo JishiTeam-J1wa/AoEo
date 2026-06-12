@@ -1,3 +1,11 @@
+// Package engine 实现 AoEo 请求调度引擎，提供多 Provider 聚合调度、负载均衡、熔断与并发控制能力。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
+
 package engine
 
 import (
@@ -12,31 +20,55 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/providers"
 )
 
-// SchedulerOption configures a Scheduler.
+// SchedulerOption 调度器配置选项函数类型。
 type SchedulerOption func(*Scheduler)
 
-// WithTimeout sets the per-provider request timeout.
+// WithTimeout 设置每个 Provider 的请求超时时间。
+//
+// Param:
+//   - d: time.Duration - 超时时长
+//
+// Return:
+//   - SchedulerOption: 调度器配置选项
 func WithTimeout(d time.Duration) SchedulerOption {
 	return func(s *Scheduler) {
 		s.timeout.Store(int64(d))
 	}
 }
 
-// WithHistory attaches a History recorder to the scheduler.
+// WithHistory 挂载历史记录器到调度器。
+//
+// Param:
+//   - h: *History - 历史记录器实例
+//
+// Return:
+//   - SchedulerOption: 调度器配置选项
 func WithHistory(h *History) SchedulerOption {
 	return func(s *Scheduler) {
 		s.history = h
 	}
 }
 
-// WithRetry sets the retry configuration for the scheduler.
+// WithRetry 设置调度器的重试配置。
+//
+// Param:
+//   - cfg: core.RetryConfig - 重试策略配置
+//
+// Return:
+//   - SchedulerOption: 调度器配置选项
 func WithRetry(cfg core.RetryConfig) SchedulerOption {
 	return func(s *Scheduler) {
 		s.retry = cfg
 	}
 }
 
-// WithInterceptors attaches interceptors to the scheduler.
+// WithInterceptors 挂载拦截器链到调度器（内部会创建副本，调用方后续修改不影响调度器）。
+//
+// Param:
+//   - ic: ...core.Interceptor - 拦截器列表
+//
+// Return:
+//   - SchedulerOption: 调度器配置选项
 func WithInterceptors(ic ...core.Interceptor) SchedulerOption {
 	return func(s *Scheduler) {
 		cpy := make([]core.Interceptor, len(ic))
@@ -45,22 +77,33 @@ func WithInterceptors(ic ...core.Interceptor) SchedulerOption {
 	}
 }
 
-// WithRouter sets the provider selection router.
+// WithRouter 设置 Provider 选择路由器。
+//
+// Param:
+//   - r: core.Router - 路由器实例
+//
+// Return:
+//   - SchedulerOption: 调度器配置选项
 func WithRouter(r core.Router) SchedulerOption {
 	return func(s *Scheduler) {
 		s.router.Store(&r)
 	}
 }
 
-// WithHealthCheckInterval sets the background health check interval.
-// Pass 0 to disable health checks.
+// WithHealthCheckInterval 设置后台健康检查间隔。传入 0 禁用健康检查。
+//
+// Param:
+//   - d: time.Duration - 检查间隔，传入 0 禁用
+//
+// Return:
+//   - SchedulerOption: 调度器配置选项
 func WithHealthCheckInterval(d time.Duration) SchedulerOption {
 	return func(s *Scheduler) {
 		s.healthCheckInterval.Store(int64(d))
 	}
 }
 
-// Sentinel errors for SDK consumers to use with errors.Is().
+// 哨兵错误，供 SDK 使用者通过 errors.Is() 进行判断。
 var (
 	ErrSchedulerClosed          = errors.New("scheduler is closed")
 	ErrNoAvailableProvider      = errors.New("no available provider")
@@ -69,60 +112,67 @@ var (
 	ErrProviderConfigIncomplete = errors.New("provider config incomplete")
 )
 
+// availCacheEntry 可用 Provider 缓存条目，用于减少高负载下的重复扫描。
 type availCacheEntry struct {
 	providers []providers.Provider
 	time      time.Time
 }
 
-// Scheduler manages multiple AI providers with load balancing, circuit breaking,
-// and concurrency control. It is the core of AoEo's multi-provider aggregation.
+// Scheduler 管理多个 AI Provider，提供负载均衡、熔断和并发控制能力。
+// 它是 AoEo 多 Provider 聚合调度的核心组件。
 type Scheduler struct {
 	mu           sync.RWMutex
 	providers    []providers.Provider
 	providerCfgs []core.ProviderConfig
 	sem          *adaptiveSemaphore
 
-	// Round-robin index for fallback/load balancing.
+	// Round-Robin 索引，用于回退/负载均衡
 	rrIndex uint64
 
-	// Configurable timeout (default 45s).
+	// 可配置的超时时间（默认 45 秒）
 	timeout atomic.Int64
 
-	// Optional history recorder.
+	// 可选的历史记录器
 	history *History
 
-	// Optional retry configuration.
+	// 可选的重试配置
 	retry core.RetryConfig
 
-	// Optional prompt injector.
+	// 可选的 Prompt 注入器
 	promptInjector atomic.Pointer[PromptInjector]
 
-	// Optional interceptors.
+	// 可选的拦截器链
 	interceptors atomic.Pointer[[]core.Interceptor]
 
-	// Optional router for provider selection strategy.
+	// 可选的路由器，用于 Provider 选择策略
 	router atomic.Pointer[core.Router]
 
-	// Cached available providers (refreshed on access if stale).
+	// 可用 Provider 缓存（过期后在下次访问时刷新）
 	availCache    atomic.Pointer[availCacheEntry]
 	availCacheTTL time.Duration
 
-	// Graceful shutdown tracking.
+	// 优雅关闭状态跟踪
 	closed  atomic.Bool
 	closeMu sync.Mutex
 
-	// Unique request ID counter.
+	// 唯一请求 ID 计数器
 	reqID atomic.Uint64
 
-	// Background health check.
-	healthCheckInterval atomic.Int64 // nanoseconds, 0 = disabled
+	// 后台健康检查
+	healthCheckInterval atomic.Int64 // 纳秒，0 = 禁用
 	healthCheckMu       sync.Mutex
 	healthCheckStop     chan struct{}
 	healthCheckWG       sync.WaitGroup
 }
 
-// NewScheduler creates a new scheduler with the given providers.
-// If no providers are given, call ApplyConfig later.
+// NewScheduler 使用给定的 Provider 列表创建一个新的调度器。
+// 如果未提供 Provider，可稍后调用 ApplyConfig 进行配置。
+//
+// Param:
+//   - provs: ...providers.Provider - Provider 列表（nil 元素会被自动跳过）
+//
+// Return:
+//   - *Scheduler: 新创建的调度器实例（默认超时 45 秒）
 func NewScheduler(provs ...providers.Provider) *Scheduler {
 	var validProvs []providers.Provider
 	totalSlots := 0
@@ -152,7 +202,14 @@ func NewScheduler(provs ...providers.Provider) *Scheduler {
 	return s
 }
 
-// NewSchedulerWithOptions creates a scheduler with options.
+// NewSchedulerWithOptions 使用 Provider 列表和配置选项创建调度器。
+//
+// Param:
+//   - providers: []providers.Provider - Provider 列表
+//   - opts: ...SchedulerOption - 配置选项
+//
+// Return:
+//   - *Scheduler: 新创建的调度器实例
 func NewSchedulerWithOptions(providers []providers.Provider, opts ...SchedulerOption) *Scheduler {
 	s := NewScheduler(providers...)
 	for _, opt := range opts {
@@ -161,7 +218,14 @@ func NewSchedulerWithOptions(providers []providers.Provider, opts ...SchedulerOp
 	return s
 }
 
-// ApplyConfig applies the given configuration, creating provider instances.
+// ApplyConfig 应用配置，根据配置创建 Provider 实例并更新调度器状态。
+// 已有配置会被完全替换。
+//
+// Param:
+//   - cfg: core.Config - 全局配置（包含 Provider 列表）
+//
+// Return:
+//   - error: 当前始终返回 nil
 func (s *Scheduler) ApplyConfig(cfg core.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -183,7 +247,7 @@ func (s *Scheduler) ApplyConfig(cfg core.Config) error {
 	}
 	s.providers = providers
 	s.providerCfgs = cfgs
-	s.availCache.Store(nil) // Invalidate cache.
+	s.availCache.Store(nil) // 配置变更后使缓存失效
 
 	if totalSlots > 0 {
 		s.sem.setMaxConc(totalSlots)
@@ -194,7 +258,13 @@ func (s *Scheduler) ApplyConfig(cfg core.Config) error {
 	return nil
 }
 
-// CreateProvider creates the appropriate provider instance based on config name.
+// CreateProvider 根据配置中的名称创建对应的 Provider 实例。
+//
+// Param:
+//   - cfg: core.ProviderConfig - Provider 配置
+//
+// Return:
+//   - providers.Provider: 对应的 Provider 实例（未识别的名称默认使用 OpenAI 兼容协议）
 func CreateProvider(cfg core.ProviderConfig) providers.Provider {
 	switch cfg.Name {
 	case "deepseek":
@@ -210,6 +280,7 @@ func CreateProvider(cfg core.ProviderConfig) providers.Provider {
 	}
 }
 
+// checkClosed 检查调度器是否已关闭，已关闭时返回 ErrSchedulerClosed。
 func (s *Scheduler) checkClosed() error {
 	if s.closed.Load() {
 		return ErrSchedulerClosed
@@ -217,10 +288,12 @@ func (s *Scheduler) checkClosed() error {
 	return nil
 }
 
-// Close marks the scheduler as closed, stops background health checks,
-// and attempts to close all providers that implement io.Closer.
-// It is safe to call multiple times (idempotent).
-// If any provider close fails, the first error is returned.
+// Close 将调度器标记为已关闭，停止后台健康检查，
+// 并尝试关闭所有实现了 io.Closer 的 Provider。
+// 可安全多次调用（幂等）。如果某个 Provider 关闭失败，返回第一个错误。
+//
+// Return:
+//   - error: 第一个 Provider 关闭错误，或 nil
 func (s *Scheduler) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
@@ -246,14 +319,16 @@ func (s *Scheduler) Close() error {
 	return firstErr
 }
 
-// StartHealthCheck starts a background goroutine that periodically health-checks
-// all providers. If a health check is already running, it is stopped and restarted
-// with the new interval. Pass 0 to disable.
+// StartHealthCheck 启动后台协程定期健康检查所有 Provider。
+// 如果已有健康检查在运行，会先停止再以新间隔重启。传入 0 禁用。
+//
+// Param:
+//   - interval: time.Duration - 检查间隔，传入 0 禁用
 func (s *Scheduler) StartHealthCheck(interval time.Duration) {
 	s.healthCheckMu.Lock()
 	defer s.healthCheckMu.Unlock()
 
-	// Stop existing loop if any.
+	// 停止已有的健康检查协程
 	s.stopHealthCheckLocked()
 
 	if interval <= 0 {
@@ -296,13 +371,13 @@ func (s *Scheduler) healthCheckLoop(interval time.Duration, stop <-chan struct{}
 	}
 }
 
-// circuitBreaker is the subset of BaseProvider methods needed by the scheduler.
+// circuitBreaker 熔断器接口，BaseProvider 方法的子集，用于记录成功/失败。
 type circuitBreaker interface {
 	RecordFailure()
 	RecordSuccess()
 }
 
-// healthReporter is the subset of BaseProvider methods for reading runtime health.
+// healthReporter 健康状态报告接口，BaseProvider 方法的子集，用于读取运行时健康信息。
 type healthReporter interface {
 	Health() core.ProviderHealth
 }
@@ -333,6 +408,7 @@ func (s *Scheduler) runHealthChecks() {
 }
 
 // ChatComplete 使用主（首个可用的）Provider 执行一次聊天补全请求。
+//
 // 执行流程：
 //  1. 检查调度器是否已关闭
 //  2. 通过信号量获取并发槽位（限制同时请求数）
@@ -345,6 +421,18 @@ func (s *Scheduler) runHealthChecks() {
 //
 // 修复 SCHED-01：始终使用 req.Clone() 进行深拷贝，避免浅拷贝导致
 // Messages 等切片字段与原始请求共享底层数组，进而引发数据竞争。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，控制超时与取消
+//   - req: core.ChatCompletionRequest - 聊天补全请求
+//
+// Return:
+//   - *core.ChatCompletionResponse: 成功时返回 Provider 的响应
+//   - error: 调度器已关闭、无可用 Provider、信号量获取失败或 Provider 调用失败时返回错误
+//
+// Edge Cases:
+//   - Provider panic 会被 recover 并转为 error 返回
+//   - 配置了重试时自动重试可恢复的错误
 func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -365,12 +453,10 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 		reqCopy.Model = p.Config().Model
 	}
 
-	// 应用 Prompt 注入（如果已配置）
 	if pi := s.promptInjector.Load(); pi != nil {
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
-	// 执行拦截器的 BeforeRequest 钩子
 	chain := s.interceptorChain()
 	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
 		return nil, err
@@ -407,6 +493,7 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 
 // ChatCompleteWithFallback 尝试使用主 Provider 执行请求；如果失败，
 // 自动回退到下一个可用的 Provider，直到成功或所有 Provider 都失败。
+//
 // 执行流程：
 //  1. 检查调度器是否已关闭，获取可用 Provider 列表
 //  2. 执行拦截器的 BeforeRequest 钩子（仅一次，在回退循环之前）
@@ -420,6 +507,18 @@ func (s *Scheduler) ChatComplete(ctx context.Context, req core.ChatCompletionReq
 //  5. 如果某个 Provider 成功则立即返回，否则继续下一个
 //
 // 修复 SCHED-02：始终使用 req.Clone() 进行深拷贝，与 SCHED-01 修复一致。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，控制超时与取消
+//   - req: core.ChatCompletionRequest - 聊天补全请求
+//
+// Return:
+//   - *core.ChatCompletionResponse: 首个成功 Provider 的响应
+//   - error: 所有 Provider 均失败时返回包装了 ErrAllProvidersFailed 的错误
+//
+// Edge Cases:
+//   - 无可用 Provider 时返回 ErrNoAvailableProvider
+//   - 路由器可用时按其排序结果确定回退顺序，否则使用默认可用列表
 func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -429,7 +528,7 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 		return nil, ErrNoAvailableProvider
 	}
 
-	// Apply interceptor BeforeRequest hooks once before the fallback loop.
+	// 在回退循环之前仅执行一次拦截器的 BeforeRequest 钩子
 	chain := s.interceptorChain()
 	if err := chain.ApplyBefore(ctx, &req); err != nil {
 		return nil, err
@@ -438,7 +537,7 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 		resp, err = chain.ApplyAfter(ctx, req, resp, err)
 	}()
 
-	// Determine fallback order via router if available.
+	// 通过路由器确定回退顺序（如果可用）
 	var order []providers.Provider
 	if r := s.router.Load(); r != nil {
 		status := s.ProviderStatus()
@@ -468,7 +567,6 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 		if reqCopy.Model == "" {
 			reqCopy.Model = p.Config().Model
 		}
-		// 应用 Prompt 注入（如果已配置）
 		if pi := s.promptInjector.Load(); pi != nil {
 			pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 		}
@@ -519,6 +617,19 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 // 适用场景：模型对比评测、结果一致性校验、冗余容灾等。
 // 如果只有一个可用 Provider，则降级为普通的 ChatComplete 调用。
 // 该操作会占用 2 个并发信号量槽位。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，控制超时与取消
+//   - req: core.ChatCompletionRequest - 聊天补全请求
+//
+// Return:
+//   - *core.DualResult: 双路结果，包含两个 Provider 的响应及一致性判断
+//   - error: 调度器已关闭、无可用 Provider 或信号量获取失败时返回错误
+//
+// Edge Cases:
+//   - 仅一个可用 Provider 时降级为单路 ChatComplete
+//   - 两个 Provider 均失败时返回包装了 ErrAllProvidersFailed 的错误
+//   - 路由器可用时优先选择两个不同的 Provider，否则回退到 Round-Robin
 func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletionRequest) (*core.DualResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -556,7 +667,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 		}
 	}
 
-	// Fallback to round-robin if router didn't yield two distinct providers.
+	// 路由器未选出两个不同 Provider 时，回退到 Round-Robin 策略
 	if p1 == nil {
 		p1 = s.PickProviderRoundRobin()
 	}
@@ -602,7 +713,7 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 		}()
 		pCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
 		defer cancel()
-		// Deep copy request to avoid race with caller modifying Messages slice.
+		// 深拷贝请求，避免并发修改 Messages 切片引发数据竞争
 		reqCopy := req.Clone()
 		if reqCopy.Model == "" {
 			reqCopy.Model = p1.Config().Model
@@ -636,7 +747,6 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 	o1 := <-ch1
 	o2 := <-ch2
 
-	// Record history for both.
 	if s.history != nil {
 		req1 := req.Clone()
 		if req1.Model == "" {
@@ -674,7 +784,13 @@ func copyProviders(src []providers.Provider) []providers.Provider {
 	return dst
 }
 
-// ProviderByName returns the provider with the given name, or nil if not found.
+// ProviderByName 返回指定名称的 Provider，未找到时返回 nil。
+//
+// Param:
+//   - name: string - Provider 名称
+//
+// Return:
+//   - providers.Provider: 匹配的 Provider 或 nil
 func (s *Scheduler) ProviderByName(name string) providers.Provider {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -686,11 +802,14 @@ func (s *Scheduler) ProviderByName(name string) providers.Provider {
 	return nil
 }
 
-// AvailableProviders returns the currently available providers.
-// It uses a short-lived cache to avoid repeated scans under high load.
-// The returned slice is a copy; modifying it does not affect internal state.
+// AvailableProviders 返回当前可用的 Provider 列表。
+// 使用短时缓存（TTL=1s）避免高负载下重复扫描。
+// 返回的切片是副本，修改不影响内部状态。
+//
+// Return:
+//   - []providers.Provider: 可用 Provider 列表的副本
 func (s *Scheduler) AvailableProviders() []providers.Provider {
-	// Try cache first.
+	// 优先检查缓存
 	if cached := s.availCache.Load(); cached != nil {
 		if time.Since(cached.time) < s.availCacheTTL {
 			return copyProviders(cached.providers)
@@ -708,7 +827,7 @@ func (s *Scheduler) AvailableProviders() []providers.Provider {
 		}
 	}
 
-	// Update cache.
+	// 刷新缓存
 	s.availCache.Store(&availCacheEntry{
 		providers: available,
 		time:      time.Now(),
@@ -716,7 +835,10 @@ func (s *Scheduler) AvailableProviders() []providers.Provider {
 	return copyProviders(available)
 }
 
-// PickPrimaryProvider returns the first available provider (user's designated primary).
+// PickPrimaryProvider 返回第一个可用的 Provider（用户指定的主 Provider）。
+//
+// Return:
+//   - providers.Provider: 首个可用 Provider，无可用时返回 nil
 func (s *Scheduler) PickPrimaryProvider() providers.Provider {
 	available := s.AvailableProviders()
 	if len(available) == 0 {
@@ -725,7 +847,10 @@ func (s *Scheduler) PickPrimaryProvider() providers.Provider {
 	return available[0]
 }
 
-// PickProviderRoundRobin selects the next available provider using round-robin.
+// PickProviderRoundRobin 使用 Round-Robin 轮询策略选择下一个可用的 Provider。
+//
+// Return:
+//   - providers.Provider: 轮询选中的 Provider，无可用时返回 nil
 func (s *Scheduler) PickProviderRoundRobin() providers.Provider {
 	available := s.AvailableProviders()
 	if len(available) == 0 {
@@ -736,8 +861,15 @@ func (s *Scheduler) PickProviderRoundRobin() providers.Provider {
 	return available[idx]
 }
 
-// pickWithRouter applies the configured router to select a provider.
-// Falls back to primary selection if no router is set.
+// pickWithRouter 使用配置的路由器选择 Provider，未配置路由器时回退到首个可用 Provider。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - req: core.ChatCompletionRequest - 聊天补全请求（供路由器决策使用）
+//
+// Return:
+//   - providers.Provider: 选中的 Provider
+//   - error: 无可用 Provider 时返回 ErrNoAvailableProvider
 func (s *Scheduler) pickWithRouter(ctx context.Context, req core.ChatCompletionRequest) (providers.Provider, error) {
 	status := s.ProviderStatus()
 	var availableIdx []int
@@ -760,14 +892,17 @@ func (s *Scheduler) pickWithRouter(ctx context.Context, req core.ChatCompletionR
 		}
 	}
 
-	// Fallback to primary (first available).
+	// 回退到主 Provider（首个可用的）
 	s.mu.RLock()
 	p := s.providers[availableIdx[0]]
 	s.mu.RUnlock()
 	return p, nil
 }
 
-// core.ProviderStatus returns the runtime status of each configured provider.
+// ProviderStatus 返回每个已配置 Provider 的运行时状态。
+//
+// Return:
+//   - []core.ProviderStatus: 所有 Provider 的状态列表
 func (s *Scheduler) ProviderStatus() []core.ProviderStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -793,7 +928,14 @@ func (s *Scheduler) ProviderStatus() []core.ProviderStatus {
 	return status
 }
 
-// TestProvider tests connectivity to a specific provider by name.
+// TestProvider 测试指定名称的 Provider 的连通性（发送简单请求验证）。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - providerName: string - 要测试的 Provider 名称
+//
+// Return:
+//   - error: Provider 不存在、配置不完整或连通性测试失败时返回错误
 func (s *Scheduler) TestProvider(ctx context.Context, providerName string) error {
 	s.mu.RLock()
 	allProvs := s.providers
@@ -831,7 +973,15 @@ func (s *Scheduler) TestProvider(ctx context.Context, providerName string) error
 	return fmt.Errorf("provider not found: %s", providerName)
 }
 
-// ListModels returns the list of available models for a specific provider.
+// ListModels 返回指定 Provider 的可用模型列表。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - providerName: string - Provider 名称
+//
+// Return:
+//   - []core.ModelInfo: 可用模型列表
+//   - error: Provider 未找到时返回包装了 ErrProviderNotFound 的错误
 func (s *Scheduler) ListModels(ctx context.Context, providerName string) ([]core.ModelInfo, error) {
 	s.mu.RLock()
 	allProvs := s.providers
@@ -845,8 +995,15 @@ func (s *Scheduler) ListModels(ctx context.Context, providerName string) ([]core
 	return nil, fmt.Errorf("%w: %s", ErrProviderNotFound, providerName)
 }
 
-// ListModelsWithConfig queries model list using a temporary config,
-// without requiring the provider to be saved in the scheduler.
+// ListModelsWithConfig 使用临时配置查询模型列表，无需 Provider 已保存在调度器中。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//   - cfg: core.ProviderConfig - 临时 Provider 配置
+//
+// Return:
+//   - []core.ModelInfo: 可用模型列表
+//   - error: 配置不完整时返回包装了 ErrProviderConfigIncomplete 的错误
 func (s *Scheduler) ListModelsWithConfig(ctx context.Context, cfg core.ProviderConfig) ([]core.ModelInfo, error) {
 	p := CreateProvider(cfg)
 	if p == nil {
@@ -855,13 +1012,19 @@ func (s *Scheduler) ListModelsWithConfig(ctx context.Context, cfg core.ProviderC
 	return p.ListModels(ctx)
 }
 
-// Acquire reserves a slot in the concurrency semaphore.
+// Acquire 预留一个并发信号量槽位。
+//
+// Return:
+//   - error: 信号量满或上下文取消时返回错误
 func (s *Scheduler) Acquire() error { return s.sem.Acquire(context.Background()) }
 
-// Release frees a slot in the concurrency semaphore.
+// Release 释放一个并发信号量槽位。
 func (s *Scheduler) Release() { s.sem.Release() }
 
-// SetSystemPrompt sets the system prompt override on all providers.
+// SetSystemPrompt 在所有 Provider 上设置系统 Prompt 覆盖值。
+//
+// Param:
+//   - sp: string - 系统 Prompt 内容
 func (s *Scheduler) SetSystemPrompt(sp string) {
 	s.mu.RLock()
 	allProvs := s.providers
@@ -874,7 +1037,7 @@ func (s *Scheduler) SetSystemPrompt(sp string) {
 	}
 }
 
-// ClearSystemPrompt removes the system prompt override from all providers.
+// ClearSystemPrompt 移除所有 Provider 上的系统 Prompt 覆盖。
 func (s *Scheduler) ClearSystemPrompt() {
 	s.mu.RLock()
 	allProvs := s.providers
@@ -887,7 +1050,19 @@ func (s *Scheduler) ClearSystemPrompt() {
 	}
 }
 
-// buildRecord creates a CallRecord with pricing/cost calculation.
+// buildRecord 构建一条包含定价/费用计算的调用记录。
+//
+// Param:
+//   - p: providers.Provider - 执行调用的 Provider
+//   - req: core.ChatCompletionRequest - 请求内容
+//   - resp: *core.ChatCompletionResponse - 响应内容（可能为 nil）
+//   - start: time.Time - 调用开始时间
+//   - err: error - 调用错误（可能为 nil）
+//   - tags: []string - 记录标签
+//   - fallbackFrom: string - 回退来源 Provider 名称（非回退场景为空字符串）
+//
+// Return:
+//   - CallRecord: 构建完成的调用记录
 func (s *Scheduler) buildRecord(p providers.Provider, req core.ChatCompletionRequest, resp *core.ChatCompletionResponse, start time.Time, err error, tags []string, fallbackFrom string) CallRecord {
 	record := CallRecord{
 		ID:           fmt.Sprintf("%s-%d-%d", p.Name(), start.UnixNano(), s.reqID.Add(1)),
@@ -914,34 +1089,52 @@ func (s *Scheduler) buildRecord(p providers.Provider, req core.ChatCompletionReq
 	return record
 }
 
-// SetTimeout updates the per-provider request timeout at runtime.
+// SetTimeout 在运行时更新每个 Provider 的请求超时时间。
+//
+// Param:
+//   - d: time.Duration - 新的超时时长，<= 0 时忽略
 func (s *Scheduler) SetTimeout(d time.Duration) {
 	if d > 0 {
 		s.timeout.Store(int64(d))
 	}
 }
 
-// IsClosed reports whether the scheduler has been closed.
+// IsClosed 报告调度器是否已关闭。
+//
+// Return:
+//   - bool: 已关闭返回 true
 func (s *Scheduler) IsClosed() bool {
 	return s.closed.Load()
 }
 
-// History returns the attached history recorder (may be nil).
+// History 返回已挂载的历史记录器（可能为 nil）。
+//
+// Return:
+//   - *History: 历史记录器实例或 nil
 func (s *Scheduler) History() *History {
 	return s.history
 }
 
-// PromptInjector returns the attached prompt injector (may be nil).
+// PromptInjector 返回已挂载的 Prompt 注入器（可能为 nil）。
+//
+// Return:
+//   - *PromptInjector: 注入器实例或 nil
 func (s *Scheduler) PromptInjector() *PromptInjector {
 	return s.promptInjector.Load()
 }
 
-// SetPromptInjector attaches a prompt injector to the scheduler.
+// SetPromptInjector 挂载 Prompt 注入器到调度器。
+//
+// Param:
+//   - pi: *PromptInjector - 要挂载的注入器实例
 func (s *Scheduler) SetPromptInjector(pi *PromptInjector) {
 	s.promptInjector.Store(pi)
 }
 
-// Interceptors returns the current interceptor slice (may be nil).
+// Interceptors 返回当前的拦截器切片（可能为 nil）。
+//
+// Return:
+//   - []core.Interceptor: 拦截器列表或 nil
 func (s *Scheduler) Interceptors() []core.Interceptor {
 	if ptr := s.interceptors.Load(); ptr != nil {
 		return *ptr
@@ -949,7 +1142,10 @@ func (s *Scheduler) Interceptors() []core.Interceptor {
 	return nil
 }
 
-// SetInterceptors replaces the interceptor chain.
+// SetInterceptors 替换拦截器链（内部会创建副本）。
+//
+// Param:
+//   - ic: []core.Interceptor - 新的拦截器列表
 func (s *Scheduler) SetInterceptors(ic []core.Interceptor) {
 	cpy := make([]core.Interceptor, len(ic))
 	copy(cpy, ic)
@@ -963,7 +1159,10 @@ func (s *Scheduler) interceptorChain() core.InterceptorChain {
 	return nil
 }
 
-// Router returns the current router (may be nil).
+// Router 返回当前的路由器（可能为 nil）。
+//
+// Return:
+//   - core.Router: 路由器实例或 nil
 func (s *Scheduler) Router() core.Router {
 	if r := s.router.Load(); r != nil {
 		return *r
@@ -971,7 +1170,10 @@ func (s *Scheduler) Router() core.Router {
 	return nil
 }
 
-// SetRouter replaces the provider selection router.
+// SetRouter 替换 Provider 选择路由器。
+//
+// Param:
+//   - r: core.Router - 新的路由器实例（传入 nil 可移除路由器）
 func (s *Scheduler) SetRouter(r core.Router) {
 	if r == nil {
 		s.router.Store(nil)
@@ -980,13 +1182,18 @@ func (s *Scheduler) SetRouter(r core.Router) {
 	}
 }
 
-// HealthCheckInterval returns the current health check interval.
+// HealthCheckInterval 返回当前的健康检查间隔。
+//
+// Return:
+//   - time.Duration: 健康检查间隔（0 表示已禁用）
 func (s *Scheduler) HealthCheckInterval() time.Duration {
 	return time.Duration(s.healthCheckInterval.Load())
 }
 
-// SetHealthCheckInterval updates the health check interval and restarts
-// the background health checker. Pass 0 to disable.
+// SetHealthCheckInterval 更新健康检查间隔并重启后台健康检查协程。传入 0 禁用。
+//
+// Param:
+//   - d: time.Duration - 新的检查间隔，传入 0 禁用
 func (s *Scheduler) SetHealthCheckInterval(d time.Duration) {
 	s.StartHealthCheck(d)
 }

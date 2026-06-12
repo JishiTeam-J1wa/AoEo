@@ -1,7 +1,10 @@
-// Package storage 提供基于 SQL 的 core.Storage 接口实现。
-// 本包支持 SQLite、MySQL 和 PostgreSQL 三种数据库后端，
-// 通过统一的 sqlStorage 结构体共享通用的数据库操作逻辑，
-// 各数据库驱动仅负责连接建立和方言差异（如占位符格式）。
+// Package storage 实现调用记录持久化存储，支持 SQLite、MySQL 和 PostgreSQL 后端。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package storage
 
 import (
@@ -31,10 +34,15 @@ type sqlStorage struct {
 // ---------------------------------------------------------------------------
 
 // createSchema 创建所有必要的数据库表和索引。
-// autoIncrement 参数是方言相关的自增主键语法片段：
-//   - SQLite:     "INTEGER PRIMARY KEY AUTOINCREMENT"
-//   - MySQL:      "INT AUTO_INCREMENT PRIMARY KEY"
-//   - PostgreSQL: "SERIAL PRIMARY KEY"
+//
+// Param:
+//   - autoIncrement: string - 方言相关的自增主键语法片段：
+//     SQLite: "INTEGER PRIMARY KEY AUTOINCREMENT"
+//     MySQL: "INT AUTO_INCREMENT PRIMARY KEY"
+//     PostgreSQL: "SERIAL PRIMARY KEY"
+//
+// Return:
+//   - error: 建表或建索引失败时返回错误
 //
 // 该函数会创建以下三张表：
 //   - calls：记录每次 AI 模型调用的详细信息（请求、响应、延迟、费用等）
@@ -102,7 +110,6 @@ func (s *sqlStorage) createSchema(autoIncrement string) error {
 			created_at INTEGER NOT NULL
 		);`, autoIncrement)
 
-	// 依次执行三张表的 CREATE TABLE 语句。
 	for _, stmt := range []string{callsSQL, auditsSQL, mappingsSQL} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("create schema: %w", err)
@@ -139,13 +146,18 @@ func (s *sqlStorage) createSchema(autoIncrement string) error {
 // RecordCall 将一次 AI 模型调用记录持久化到数据库中。
 // 它会将请求体、响应体和标签列表序列化为 JSON 字符串后存入对应的 TEXT 字段。
 // 使用 ExecContext 执行 INSERT 语句，支持通过 ctx 进行超时控制和取消。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - r: core.CallRecord - 待持久化的调用记录
+//
+// Return:
+//   - error: 插入失败时返回错误
 func (s *sqlStorage) RecordCall(ctx context.Context, r core.CallRecord) error {
-	// 将复杂对象序列化为 JSON 字符串以便存储到 TEXT 字段中。
 	reqJSON, _ := json.Marshal(r.Request)
 	respJSON, _ := json.Marshal(r.Response)
 	tagsJSON, _ := json.Marshal(r.Tags)
 
-	// 执行 INSERT 语句，共 12 个字段对应 12 个占位符。
 	// r.Timestamp.Unix() 将时间转换为 Unix 时间戳存储，避免时区问题。
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO calls (id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency) VALUES ("+
@@ -157,14 +169,19 @@ func (s *sqlStorage) RecordCall(ctx context.Context, r core.CallRecord) error {
 }
 
 // GetCalls 获取最近的调用记录列表，按时间戳降序排列。
-// limit 参数控制返回的最大记录数，若 <= 0 则默认返回 100 条。
-// 返回的切片会按时间从新到旧排序，方便前端直接展示。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.CallRecord: 按时间从新到旧排序的调用记录切片
+//   - error: 查询失败时返回错误
 func (s *sqlStorage) GetCalls(ctx context.Context, limit int) ([]core.CallRecord, error) {
-	// 参数校验：限制默认值为 100，防止不传参时返回过多数据。
+	// 限制默认值为 100，防止不传参时返回过多数据。
 	if limit <= 0 {
 		limit = 100
 	}
-	// 查询 calls 表全部字段，按 timestamp 降序排列，通过 LIMIT 限制返回条数。
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency FROM calls ORDER BY timestamp DESC LIMIT "+s.ph(1),
 		limit,
@@ -172,16 +189,24 @@ func (s *sqlStorage) GetCalls(ctx context.Context, limit int) ([]core.CallRecord
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() // 确保无论成功与否都关闭 rows，释放游标资源。
+	defer rows.Close()
 	return s.scanCalls(rows, limit)
 }
 
 // GetCallsByTag 根据标签搜索调用记录。
 // 它会在 tags_json 字段中通过 LIKE 模糊匹配查找包含指定 tag 的记录。
 // tag 参数中的 SQL 通配符（% 和 _）会被转义，防止用户输入干扰 LIKE 语义。
-// limit 参数控制返回的最大记录数，若 <= 0 则默认返回 100 条。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - tag: string - 待搜索的标签名称
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.CallRecord: 按时间从新到旧排序的调用记录切片
+//   - error: 查询失败时返回错误
 func (s *sqlStorage) GetCallsByTag(ctx context.Context, tag string, limit int) ([]core.CallRecord, error) {
-	// 参数校验：限制默认值为 100。
+	// 限制默认值为 100。
 	if limit <= 0 {
 		limit = 100
 	}
@@ -191,7 +216,6 @@ func (s *sqlStorage) GetCallsByTag(ctx context.Context, tag string, limit int) (
 	// 例如 tag="100%" 不转义的话会变成匹配所有以 "100" 开头的字符串。
 	escapedTag := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(tag)
 
-	// 构建 LIKE 模式：前后加 % 表示只要 tags_json 中任意位置包含该 tag 即可匹配。
 	// tags_json 是 JSON 数组格式（如 ["tag1","tag2"]），所以用 LIKE 做子串匹配。
 	pattern := "%" + escapedTag + "%"
 	rows, err := s.db.QueryContext(ctx,
@@ -201,19 +225,26 @@ func (s *sqlStorage) GetCallsByTag(ctx context.Context, tag string, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() // 确保无论成功与否都关闭 rows，释放游标资源。
+	defer rows.Close()
 	return s.scanCalls(rows, limit)
 }
 
 // GetCallsByProvider 根据服务提供商名称获取调用记录列表。
 // 使用精确匹配（provider = ?）而非 LIKE，因为 provider 名称是确定性的标识。
-// limit 参数控制返回的最大记录数，若 <= 0 则默认返回 100 条。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - provider: string - 服务提供商名称
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.CallRecord: 按时间从新到旧排序的调用记录切片
+//   - error: 查询失败时返回错误
 func (s *sqlStorage) GetCallsByProvider(ctx context.Context, provider string, limit int) ([]core.CallRecord, error) {
-	// 参数校验：限制默认值为 100。
+	// 限制默认值为 100。
 	if limit <= 0 {
 		limit = 100
 	}
-	// 按 provider 精确过滤，按 timestamp 降序排列，通过 LIMIT 限制返回条数。
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency FROM calls WHERE provider = "+s.ph(1)+" ORDER BY timestamp DESC LIMIT "+s.ph(2),
 		provider, limit,
@@ -221,7 +252,7 @@ func (s *sqlStorage) GetCallsByProvider(ctx context.Context, provider string, li
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() // 确保无论成功与否都关闭 rows，释放游标资源。
+	defer rows.Close()
 	return s.scanCalls(rows, limit)
 }
 
@@ -232,9 +263,13 @@ func (s *sqlStorage) GetCallsByProvider(ctx context.Context, provider string, li
 //   - AVG(latency_ms)：平均延迟（可能为 NULL，当没有记录时）
 //   - SUM(CASE WHEN error != '' THEN 1 ELSE 0 END)：错误调用次数
 //
-// 返回一个 map，key 为 provider 名称，value 为对应的统计结构体。
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//
+// Return:
+//   - map[string]core.ProviderStats: key 为 provider 名称，value 为对应的统计结构体
+//   - error: 查询失败时返回错误
 func (s *sqlStorage) GetProviderStats(ctx context.Context) (map[string]core.ProviderStats, error) {
-	// 聚合查询：按 provider 和 currency 分组，计算调用次数、总费用、平均延迟和错误次数。
 	// 注意：当 calls 表为空时，SUM(cost) 和 AVG(latency_ms) 都会返回 NULL。
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT provider, COUNT(*), SUM(cost), currency, AVG(latency_ms), SUM(CASE WHEN error != '' THEN 1 ELSE 0 END) FROM calls GROUP BY provider, currency",
@@ -242,7 +277,7 @@ func (s *sqlStorage) GetProviderStats(ctx context.Context) (map[string]core.Prov
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() // 确保无论成功与否都关闭 rows，释放游标资源。
+	defer rows.Close()
 
 	stats := make(map[string]core.ProviderStats)
 	for rows.Next() {
@@ -257,17 +292,15 @@ func (s *sqlStorage) GetProviderStats(ctx context.Context) (map[string]core.Prov
 		var totalCost sql.NullFloat64
 		var avgLatency sql.NullFloat64
 
-		// 注意：Scan 的字段顺序必须与 SELECT 列的顺序严格一致。
+		// Scan 的字段顺序必须与 SELECT 列的顺序严格一致。
 		// SELECT 顺序：provider, COUNT(*), SUM(cost), currency, AVG(latency_ms), SUM(error count)
 		if err := rows.Scan(&p.Provider, &p.TotalCalls, &totalCost, &currency, &avgLatency, &p.ErrorCount); err != nil {
 			return nil, err
 		}
 
-		// 将 sql.NullFloat64 转换为普通值。
 		// 如果 SUM(cost) 为 NULL（Valid == false），则 TotalCost 默认为 0。
 		p.TotalCost = totalCost.Float64
 		p.Currency = currency.String
-		// 将平均延迟从 float64 转换为 int64 毫秒。
 		// 如果 AVG(latency_ms) 为 NULL（Valid == false），则 AvgLatency 默认为 0。
 		p.AvgLatency = int64(avgLatency.Float64)
 
@@ -281,6 +314,14 @@ func (s *sqlStorage) GetProviderStats(ctx context.Context) (map[string]core.Prov
 // 它是 GetCalls、GetCallsByTag、GetCallsByProvider 共用的内部辅助函数。
 // limit 参数用于预分配结果切片的容量，减少 append 时的内存分配次数。
 //
+// Param:
+//   - rows: *sql.Rows - 数据库查询结果游标
+//   - limit: int - 预分配切片容量
+//
+// Return:
+//   - []core.CallRecord: 扫描得到的调用记录切片
+//   - error: 扫描过程中出错时返回错误
+//
 // Bug S-07 修复：通过 make([]core.CallRecord, 0, limit) 预分配切片容量。
 // 之前使用 var result []core.CallRecord（零值切片），每次 append 都可能触发
 // 底层数组的扩容和数据拷贝。预分配可以显著减少内存分配开销，
@@ -293,14 +334,13 @@ func (s *sqlStorage) scanCalls(rows *sql.Rows, limit int) ([]core.CallRecord, er
 		// reqJSON、respJSON、tagsJSON 是 JSON 格式的 TEXT 字段，
 		// 先扫描为 string，再反序列化为对应的 Go 对象。
 		var reqJSON, respJSON, tagsJSON string
-		// tsUnix 用于接收 Unix 时间戳，之后转换为 time.Time。
 		var tsUnix int64
 		if err := rows.Scan(&r.ID, &r.Provider, &r.Model, &reqJSON, &respJSON, &r.Error, &r.LatencyMs, &tsUnix, &tagsJSON, &r.FallbackFrom, &r.Cost, &r.Currency); err != nil {
 			return nil, err
 		}
 		// 将 Unix 时间戳转换为 time.Time 对象。
 		r.Timestamp = time.Unix(tsUnix, 0)
-		// 反序列化 JSON 字段。这里忽略 Unmarshal 错误（使用 _），
+		// 这里忽略 Unmarshal 错误（使用 _），
 		// 因为 JSON 格式不正确时字段会保持零值，不影响其他字段的使用。
 		json.Unmarshal([]byte(reqJSON), &r.Request)
 		json.Unmarshal([]byte(respJSON), &r.Response)
@@ -318,8 +358,14 @@ func (s *sqlStorage) scanCalls(rows *sql.Rows, limit int) ([]core.CallRecord, er
 // RecordAudit 将一条审计事件持久化到数据库中。
 // 审计日志用于记录内容审核的完整链路，包括命中的规则、检测跨度、采取的动作等。
 // e.HitsJSON 和 e.SpansJSON 已经是序列化好的 JSON 字符串，直接存入 TEXT 字段。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - e: core.AuditEvent - 待持久化的审计事件
+//
+// Return:
+//   - error: 插入失败时返回错误
 func (s *sqlStorage) RecordAudit(ctx context.Context, e core.AuditEvent) error {
-	// 执行 INSERT 语句，共 10 个字段对应 10 个占位符。
 	// e.Timestamp.Unix() 将时间转换为 Unix 时间戳存储，避免时区问题。
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO audits (timestamp, stage, type, hits_json, spans_json, action, provider, model, content_hash, content_preview) VALUES ("+s.placeholders(10)+")",
@@ -329,14 +375,19 @@ func (s *sqlStorage) RecordAudit(ctx context.Context, e core.AuditEvent) error {
 }
 
 // GetAudits 获取最近的审计日志列表，按时间戳降序排列。
-// limit 参数控制返回的最大记录数，若 <= 0 则默认返回 100 条。
-// 返回的切片会按时间从新到旧排序，方便前端直接展示。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.AuditEvent: 按时间从新到旧排序的审计事件切片
+//   - error: 查询失败时返回错误
 func (s *sqlStorage) GetAudits(ctx context.Context, limit int) ([]core.AuditEvent, error) {
-	// 参数校验：限制默认值为 100，防止不传参时返回过多数据。
+	// 限制默认值为 100，防止不传参时返回过多数据。
 	if limit <= 0 {
 		limit = 100
 	}
-	// 查询 audits 表全部字段，按 timestamp 降序排列，通过 LIMIT 限制返回条数。
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, timestamp, stage, type, hits_json, spans_json, action, provider, model, content_hash, content_preview FROM audits ORDER BY timestamp DESC LIMIT "+s.ph(1),
 		limit,
@@ -344,7 +395,7 @@ func (s *sqlStorage) GetAudits(ctx context.Context, limit int) ([]core.AuditEven
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() // 确保无论成功与否都关闭 rows，释放游标资源。
+	defer rows.Close()
 
 	var result []core.AuditEvent
 	for rows.Next() {
@@ -354,7 +405,6 @@ func (s *sqlStorage) GetAudits(ctx context.Context, limit int) ([]core.AuditEven
 		if err := rows.Scan(&e.ID, &tsUnix, &e.Stage, &e.Type, &e.HitsJSON, &e.SpansJSON, &e.Action, &e.Provider, &e.Model, &e.ContentHash, &e.ContentPreview); err != nil {
 			return nil, err
 		}
-		// 将 Unix 时间戳转换为 time.Time 对象。
 		e.Timestamp = time.Unix(tsUnix, 0)
 		result = append(result, e)
 	}
@@ -369,8 +419,14 @@ func (s *sqlStorage) GetAudits(ctx context.Context, limit int) ([]core.AuditEven
 // CreateMapping 将一条隐私数据映射关系持久化到数据库中。
 // 每条映射记录一个"原始值"到"假值"的对应关系，
 // 在同一个 session 内，相同的原始值始终映射到相同的假值，保证脱敏一致性。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - m: core.PrivacyMapping - 待持久化的映射关系
+//
+// Return:
+//   - error: 插入失败时返回错误
 func (s *sqlStorage) CreateMapping(ctx context.Context, m core.PrivacyMapping) error {
-	// 执行 INSERT 语句，共 5 个字段对应 5 个占位符。
 	// m.CreatedAt.Unix() 将时间转换为 Unix 时间戳存储。
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO privacy_mappings (session_id, original, fake, type, created_at) VALUES ("+s.placeholders(5)+")",
@@ -380,17 +436,22 @@ func (s *sqlStorage) CreateMapping(ctx context.Context, m core.PrivacyMapping) e
 }
 
 // FindFake 根据 session ID 和原始值查找对应的假值。
-// 返回值：
-//   - fake：找到的假值字符串
-//   - bool：是否找到（true 表示找到，false 表示未找到）
-//   - error：数据库错误
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - sessionID: string - 会话标识
+//   - original: string - 隐私数据的原始值
+//
+// Return:
+//   - string: 找到的假值字符串
+//   - bool: 是否找到（true 表示找到，false 表示未找到）
+//   - error: 数据库错误
 //
 // 当 QueryRowContext 返回 sql.ErrNoRows 时，说明该映射不存在，返回 ("", false, nil)。
 // 这是正常的"未找到"情况，不应视为错误。
 func (s *sqlStorage) FindFake(ctx context.Context, sessionID, original string) (string, bool, error) {
 	var fake string
 	err := s.db.QueryRowContext(ctx,
-		// 按 session_id 和 original 两个条件精确匹配查询。
 		"SELECT fake FROM privacy_mappings WHERE session_id = "+s.ph(1)+" AND original = "+s.ph(2),
 		sessionID, original,
 	).Scan(&fake)
@@ -406,14 +467,19 @@ func (s *sqlStorage) FindFake(ctx context.Context, sessionID, original string) (
 
 // FindOriginal 根据 session ID 和假值反向查找对应的原始值。
 // 这是 FindFake 的反向操作，用于在需要还原脱敏数据时查找原始值。
-// 返回值：
-//   - original：找到的原始值字符串
-//   - bool：是否找到（true 表示找到，false 表示未找到）
-//   - error：数据库错误
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - sessionID: string - 会话标识
+//   - fake: string - 隐私数据的假值
+//
+// Return:
+//   - string: 找到的原始值字符串
+//   - bool: 是否找到（true 表示找到，false 表示未找到）
+//   - error: 数据库错误
 func (s *sqlStorage) FindOriginal(ctx context.Context, sessionID, fake string) (string, bool, error) {
 	var original string
 	err := s.db.QueryRowContext(ctx,
-		// 按 session_id 和 fake 两个条件精确匹配查询。
 		"SELECT original FROM privacy_mappings WHERE session_id = "+s.ph(1)+" AND fake = "+s.ph(2),
 		sessionID, fake,
 	).Scan(&original)
@@ -431,8 +497,15 @@ func (s *sqlStorage) FindOriginal(ctx context.Context, sessionID, fake string) (
 // 结果按 fake 字段长度降序排列（ORDER BY LENGTH(fake) DESC），
 // 这样可以确保较长的假值优先被匹配，避免短假值误替换长假值的一部分。
 // 例如：假值 "John" 应该比 "Jo" 先被处理，否则 "John" 中的 "Jo" 可能被错误替换。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - sessionID: string - 会话标识
+//
+// Return:
+//   - []core.PrivacyMapping: 按假值长度降序排列的映射关系切片
+//   - error: 查询失败时返回错误
 func (s *sqlStorage) GetMappings(ctx context.Context, sessionID string) ([]core.PrivacyMapping, error) {
-	// 按 session_id 过滤，按 fake 长度降序排列。
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, session_id, original, fake, type, created_at FROM privacy_mappings WHERE session_id = "+s.ph(1)+" ORDER BY LENGTH(fake) DESC",
 		sessionID,
@@ -440,7 +513,7 @@ func (s *sqlStorage) GetMappings(ctx context.Context, sessionID string) ([]core.
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close() // 确保无论成功与否都关闭 rows，释放游标资源。
+	defer rows.Close()
 
 	var result []core.PrivacyMapping
 	for rows.Next() {
@@ -449,7 +522,6 @@ func (s *sqlStorage) GetMappings(ctx context.Context, sessionID string) ([]core.
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Original, &m.Fake, &m.Type, &tsUnix); err != nil {
 			return nil, err
 		}
-		// 将 Unix 时间戳转换为 time.Time 对象。
 		m.CreatedAt = time.Unix(tsUnix, 0)
 		result = append(result, m)
 	}
@@ -460,6 +532,13 @@ func (s *sqlStorage) GetMappings(ctx context.Context, sessionID string) ([]core.
 // DeleteMappingsBySession 删除指定 session 下的所有隐私映射关系。
 // 当一个 session 结束或用户主动清除脱敏历史时调用此方法。
 // 该操作不可逆，请确保调用前已确认用户的删除意图。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - sessionID: string - 会话标识
+//
+// Return:
+//   - error: 删除失败时返回错误
 func (s *sqlStorage) DeleteMappingsBySession(ctx context.Context, sessionID string) error {
 	_, err := s.db.ExecContext(ctx,
 		"DELETE FROM privacy_mappings WHERE session_id = "+s.ph(1),
@@ -470,7 +549,13 @@ func (s *sqlStorage) DeleteMappingsBySession(ctx context.Context, sessionID stri
 
 // CleanupMappings 删除指定时间点之前创建的所有隐私映射关系。
 // 用于定期清理过期的映射数据，防止数据库无限膨胀。
-// before 参数指定截止时间，所有 created_at 早于该时间的记录都会被删除。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - before: time.Time - 截止时间，所有 created_at 早于该时间的记录都会被删除
+//
+// Return:
+//   - error: 删除失败时返回错误
 func (s *sqlStorage) CleanupMappings(ctx context.Context, before time.Time) error {
 	// before.Unix() 将 time.Time 转换为 Unix 时间戳进行比较。
 	_, err := s.db.ExecContext(ctx,
@@ -483,6 +568,9 @@ func (s *sqlStorage) CleanupMappings(ctx context.Context, before time.Time) erro
 // Close 关闭底层数据库连接池，释放所有相关资源。
 // 应当在程序退出或不再需要该存储实例时调用。
 // 关闭后不能再通过该实例执行任何数据库操作。
+//
+// Return:
+//   - error: 关闭失败时返回错误
 func (s *sqlStorage) Close() error {
 	return s.db.Close()
 }

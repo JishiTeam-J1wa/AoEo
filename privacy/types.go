@@ -1,8 +1,12 @@
-// Package privacy provides a pseudonymization gateway for AoEo that ensures
-// sensitive information (PII, internal IPs, domains, etc.) never reaches
-// external AI APIs in plaintext. The gateway intercepts requests, replaces
-// sensitive values with realistic fake equivalents, and restores the original
-// values in the AI response before returning them to the user.
+// Package privacy 为 AoEo 提供伪匿名化网关，确保敏感信息（PII、内部 IP、域名等）
+// 不会以明文形式到达外部 AI API。网关拦截请求，将敏感值替换为逼真的伪造等价物，
+// 并在 AI 响应返回给用户之前还原为原始值。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package privacy
 
 import (
@@ -10,7 +14,7 @@ import (
 	"time"
 )
 
-// EntityType classifies the kind of sensitive data detected.
+// EntityType 对检测到的敏感数据进行分类。
 type EntityType string
 
 const (
@@ -26,7 +30,7 @@ const (
 	EntityDate    EntityType = "date"
 )
 
-// Severity indicates how critical a detection is.
+// Severity 表示检测结果的严重程度。
 type Severity int
 
 const (
@@ -51,7 +55,7 @@ func (s Severity) String() string {
 	}
 }
 
-// Action defines how a detected sensitive value is handled.
+// Action 定义检测到敏感值后的处理方式。
 type Action int
 
 const (
@@ -76,7 +80,7 @@ func (a Action) String() string {
 	}
 }
 
-// Span represents a sensitive segment detected by the Privacy Filter model.
+// Span 表示 Privacy Filter 模型检测到的敏感片段。
 type Span struct {
 	Start    int
 	End      int
@@ -85,7 +89,7 @@ type Span struct {
 	Original string
 }
 
-// MappingEntry stores the reversible original-to-fake mapping.
+// MappingEntry 存储可逆的 original-to-fake 映射关系。
 type MappingEntry struct {
 	ID        int64
 	SessionID string
@@ -95,13 +99,12 @@ type MappingEntry struct {
 	CreatedAt time.Time
 }
 
-// DetectResult aggregates detections from the AI privacy filter model.
+// DetectResult 聚合 AI Privacy Filter 模型的检测结果。
 type DetectResult struct {
 	Spans []Span
 }
 
-// PrivacyViolationError is returned when sensitive data is detected and the
-// configured policy is to block the request.
+// PrivacyViolationError 在检测到敏感数据且配置策略为阻止时返回。
 type PrivacyViolationError struct {
 	Layer   string // "privacy_filter"
 	Spans   []Span // model detections (if any)

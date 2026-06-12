@@ -1,3 +1,10 @@
+// Package core 核心类型定义，包含聊天补全请求/响应、工具调用、流式传输等公共数据结构。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package core
 
 import (
@@ -22,13 +29,13 @@ type Usage struct {
 type FunctionDefinition struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
-	Parameters  any    `json:"parameters,omitempty"` // json.RawMessage or a struct
+	Parameters  any    `json:"parameters,omitempty"` // json.RawMessage 或结构体
 	Strict      bool   `json:"strict,omitempty"`
 }
 
 // Tool 表示模型可以使用的工具（目前仅支持函数类型）。
 type Tool struct {
-	Type     string              `json:"type"` // "function"
+	Type     string              `json:"type"` // 固定为 "function"
 	Function *FunctionDefinition `json:"function,omitempty"`
 }
 
@@ -44,13 +51,13 @@ type ToolChoice struct {
 // FunctionCall 表示模型生成的函数调用，包含函数名和参数（JSON 字符串）。
 type FunctionCall struct {
 	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // JSON string
+	Arguments string `json:"arguments"` // JSON 格式的参数字符串
 }
 
 // ToolCall 表示模型生成的工具调用（目前为函数调用）。
 type ToolCall struct {
 	ID       string       `json:"id"`
-	Type     string       `json:"type"` // "function"
+	Type     string       `json:"type"` // 固定为 "function"
 	Function FunctionCall `json:"function"`
 	Index    int          `json:"index,omitempty"`
 }
@@ -61,9 +68,9 @@ type Message struct {
 	Role             string     `json:"role"`
 	Content          string     `json:"content,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	Name             string     `json:"name,omitempty"`         // function name for tool results
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`   // assistant messages with tool calls
-	ToolCallID       string     `json:"tool_call_id,omitempty"` // tool result messages
+	Name             string     `json:"name,omitempty"`         // tool 结果消息中的函数名
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`   // assistant 消息中的工具调用列表
+	ToolCallID       string     `json:"tool_call_id,omitempty"` // tool 结果消息关联的调用 ID
 }
 
 // ChatCompletionRequest 是所有 Provider 统一使用的聊天补全请求类型。
@@ -91,7 +98,13 @@ type ChatCompletionRequest struct {
 }
 
 // Validate 校验请求中的常见配置错误。
-// 返回错误信息切片，空切片表示请求有效。
+//
+// Return:
+//   - []string: 错误信息切片，空切片表示请求有效
+//
+// Edge Cases:
+//   - assistant 和 tool 角色允许 Content 为空（工具调用场景）
+//   - Temperature 有效范围 0~2，TopP 有效范围 0~1
 func (req ChatCompletionRequest) Validate() []string {
 	var issues []string
 	if len(req.Messages) == 0 {
@@ -134,7 +147,11 @@ type ChatCompletionResponse struct {
 }
 
 // Content 返回第一个补全结果的文本内容。
-// 这是一个安全的便捷访问器，避免索引越界 panic。
+//
+// 安全访问器，对 nil 接收器和空 Choices 列表做防御处理，避免索引越界 panic。
+//
+// Return:
+//   - string: 第一个 Choice 的 Message.Content，无结果时返回空字符串
 func (r *ChatCompletionResponse) Content() string {
 	if r == nil || len(r.Choices) == 0 {
 		return ""
@@ -203,7 +220,11 @@ type AuditResult struct {
 }
 
 // Clone 创建请求的深拷贝，包括 Messages、Tags、Tools 和 Metadata。
+//
 // Function 指针会被独立拷贝，确保克隆体与原始对象互不影响。
+//
+// Return:
+//   - ChatCompletionRequest: 独立的请求副本
 func (req ChatCompletionRequest) Clone() ChatCompletionRequest {
 	cloned := req
 	if len(req.Messages) > 0 {

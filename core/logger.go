@@ -1,3 +1,10 @@
+// Package core 日志抽象层，提供结构化日志接口及默认 slog 实现。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package core
 
 import (
@@ -6,8 +13,9 @@ import (
 	"sync/atomic"
 )
 
-// Logger is the structured logging interface used by AoEo.
-// It defaults to slog with JSON output. Override via SetLogger.
+// Logger 是 AoEo 使用的结构化日志接口。
+//
+// 默认实现为 slog JSON 输出，可通过 SetLogger 替换为自定义实现。
 type Logger interface {
 	Debug(msg string, attrs ...any)
 	Info(msg string, attrs ...any)
@@ -15,7 +23,7 @@ type Logger interface {
 	Error(msg string, attrs ...any)
 }
 
-// defaultLogger wraps slog for AoEo's Logger interface.
+// defaultLogger 将 slog.Logger 适配为 AoEo 的 Logger 接口。
 type defaultLogger struct {
 	inner *slog.Logger
 }
@@ -34,7 +42,10 @@ func init() {
 	aoLogger.Store(&l)
 }
 
-// SetLogger replaces the default logger with a custom implementation.
+// SetLogger 将默认日志替换为自定义实现。
+//
+// Param:
+//   - l: Logger - 自定义日志实例，传 nil 时忽略
 func SetLogger(l Logger) {
 	if l == nil {
 		return
@@ -42,7 +53,7 @@ func SetLogger(l Logger) {
 	aoLogger.Store(&l)
 }
 
-// GetLogger returns the current logger.
+// GetLogger 返回当前使用的日志实例。
 func GetLogger() Logger {
 	return *aoLogger.Load()
 }

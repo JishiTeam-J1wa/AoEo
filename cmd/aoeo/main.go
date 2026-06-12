@@ -1,3 +1,10 @@
+// main.go 是 AoEo CLI 命令行工具的入口，提供模型列表、健康检查、聊天补全等子命令。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package main
 
 import (
@@ -14,6 +21,9 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/privacy"
 )
 
+// main 是 AoEo CLI 的入口函数。
+// 解析第一个命令行参数作为子命令，分发到对应的处理函数。
+// 支持的子命令：list-models、test、status、chat、stream、help。
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -41,6 +51,7 @@ func main() {
 	}
 }
 
+// usage 打印 CLI 帮助信息，列出所有可用的子命令和使用示例。
 func usage() {
 	fmt.Println(`AoEo CLI — AI API gateway command line tool
 
@@ -62,6 +73,11 @@ Examples:
   aoeo stream -message "Explain Go routines" -provider deepseek`)
 }
 
+// loadClient 从环境变量加载配置并创建 AoEo 客户端实例。
+//
+// Return:
+//   - *aoeo.Client: 初始化完成的客户端实例
+//   - error: 配置加载失败或未配置任何 Provider 时返回错误
 func loadClient() (*aoeo.Client, error) {
 	cfg := aoeo.LoadConfigFromEnv()
 	if len(cfg.Providers) == 0 {
@@ -70,8 +86,8 @@ func loadClient() (*aoeo.Client, error) {
 	return aoeo.NewClient(cfg, privacy.WithPrivacyFilter())
 }
 
-// ---------- list-models ----------
-
+// cmdListModels 处理 list-models 子命令，列出所有已配置 Provider 支持的可用模型。
+// 以表格形式输出 Provider 名称、模型 ID 和所属方。
 func cmdListModels(args []string) {
 	fs := flag.NewFlagSet("list-models", flag.ExitOnError)
 	_ = fs.Parse(args)
@@ -105,8 +121,8 @@ func cmdListModels(args []string) {
 	w.Flush()
 }
 
-// ---------- test ----------
-
+// cmdTest 处理 test 子命令，对所有已配置的 Provider 执行健康检查。
+// 以表格形式输出各 Provider 的状态、延迟和错误信息。
 func cmdTest(args []string) {
 	fs := flag.NewFlagSet("test", flag.ExitOnError)
 	_ = fs.Parse(args)
@@ -125,7 +141,7 @@ func cmdTest(args []string) {
 	fmt.Fprintln(w, "PROVIDER\tSTATUS\tLATENCY\tMESSAGE")
 
 	for _, ps := range statuses {
-		// Find the actual provider to call HealthCheck
+		// 查找实际的 Provider 并执行 HealthCheck
 		err := client.TestProvider(ctx, ps.Name)
 		latency := "—"
 		if ps.Health.LastLatencyMs > 0 {
@@ -140,8 +156,8 @@ func cmdTest(args []string) {
 	w.Flush()
 }
 
-// ---------- status ----------
-
+// cmdStatus 处理 status 子命令，展示各 Provider 的运行状态、
+// 平均延迟、成功率和连续失败次数等健康指标。
 func cmdStatus(args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	_ = fs.Parse(args)
@@ -174,8 +190,8 @@ func cmdStatus(args []string) {
 	w.Flush()
 }
 
-// ---------- chat ----------
-
+// cmdChat 处理 chat 子命令，发送一次同步聊天补全请求并输出响应内容。
+// 支持 -message（必选）、-provider、-model、-temperature 等参数。
 func cmdChat(args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	msg := fs.String("message", "", "Message to send (required)")
@@ -220,8 +236,8 @@ func cmdChat(args []string) {
 	fmt.Println(resp.Content())
 }
 
-// ---------- stream ----------
-
+// cmdStream 处理 stream 子命令，发送一次流式聊天补全请求并实时输出响应内容。
+// 支持 -message（必选）、-provider、-model、-temperature 等参数。
 func cmdStream(args []string) {
 	fs := flag.NewFlagSet("stream", flag.ExitOnError)
 	msg := fs.String("message", "", "Message to send (required)")
@@ -272,8 +288,11 @@ func cmdStream(args []string) {
 	fmt.Println()
 }
 
-// ---------- privacy ----------
-
+// cmdPrivacy 处理 privacy 子命令，检查隐私过滤 Sidecar 的运行状态和统计信息。
+//
+// 注意：该函数疑似死代码——main() 的 switch 语句中未注册 "privacy" 子命令，
+// 因此当前无法通过 CLI 调用到此函数。usage() 的帮助文本中仍列出了 privacy 命令，
+// 建议后续在 main() 的 switch 中补充注册或移除该函数。
 func cmdPrivacy(args []string) {
 	fs := flag.NewFlagSet("privacy", flag.ExitOnError)
 	_ = fs.Parse(args)

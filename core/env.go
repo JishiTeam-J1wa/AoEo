@@ -1,3 +1,10 @@
+// Package core 环境变量配置加载，支持从系统环境变量读取多 Provider 配置和重试策略。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package core
 
 import (
@@ -9,15 +16,26 @@ import (
 )
 
 // LoadConfigFromEnv 从 AOEO_PROVIDER_N_* 环境变量加载多 Provider 配置。
+//
 // 索引从 0 开始，遇到空位（NAME 为空）终止扫描。
 // 同时加载 AOEO_AUDIT_ENABLED 和 AOEO_RETRY_* 配置。
+//
+// Return:
+//   - Config: 从环境变量解析得到的配置对象
 func LoadConfigFromEnv() Config {
 	return LoadConfigFromEnvWithPrefix("AOEO")
 }
 
 // LoadConfigFromEnvWithPrefix 使用自定义前缀从环境变量构建 Config。
+//
 // 例如前缀为 "MYAPP" 时，将读取 MYAPP_PROVIDER_0_NAME 等变量。
 // 扫描逻辑与 LoadConfigFromEnv 相同：从索引 0 开始，遇到 NAME 为空时终止。
+//
+// Param:
+//   - prefix: string - 环境变量前缀，如 "AOEO"、"MYAPP"
+//
+// Return:
+//   - Config: 从环境变量解析得到的配置对象
 func LoadConfigFromEnvWithPrefix(prefix string) Config {
 	var providers []ProviderConfig
 	for i := 0; ; i++ {
@@ -52,8 +70,15 @@ func LoadConfigFromEnvWithPrefix(prefix string) Config {
 }
 
 // EnvConfigString 从单个环境变量中解析 Provider 配置。
+//
 // 环境变量值的格式为 "name|apiKey|endpoint|model|maxConcurrent|proxy"，
 // 用于简化部署场景。如果变量未设置，返回空的 ProviderConfig。
+//
+// Param:
+//   - envVar: string - 环境变量名称
+//
+// Return:
+//   - ProviderConfig: 解析得到的 Provider 配置，变量未设置时为零值
 func EnvConfigString(envVar string) ProviderConfig {
 	s := os.Getenv(envVar)
 	if s == "" {
@@ -85,7 +110,11 @@ func EnvConfigString(envVar string) ProviderConfig {
 }
 
 // SetEnvConfig 将 Config 写入环境变量。
+//
 // 主要用于测试和工具链，不建议在生产环境中用于存储敏感密钥。
+//
+// Param:
+//   - cfg: Config - 待写入的配置对象
 func SetEnvConfig(cfg Config) {
 	for i, pc := range cfg.Providers {
 		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
@@ -109,6 +138,9 @@ func SetEnvConfig(cfg Config) {
 }
 
 // UnsetEnvConfig 清除由 SetEnvConfig 设置的所有 AOEO_ 环境变量。
+//
+// Param:
+//   - cfg: Config - 用于确定需清除的 Provider 索引范围
 func UnsetEnvConfig(cfg Config) {
 	for i := range cfg.Providers {
 		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
@@ -125,10 +157,15 @@ func UnsetEnvConfig(cfg Config) {
 
 // RetryConfigFromEnv 从环境变量加载重试配置。
 //
+// 支持的环境变量：
+//
 //	AOEO_RETRY_MAX_RETRIES  - 最大重试次数，默认 0（禁用）
 //	AOEO_RETRY_BASE_DELAY   - 基础延迟时间，默认 1s
 //	AOEO_RETRY_MAX_DELAY    - 最大延迟时间，默认 30s
 //	AOEO_RETRY_MULTIPLIER   - 指数退避乘数，默认 2.0
+//
+// Return:
+//   - RetryConfig: 从环境变量解析得到的重试配置
 func RetryConfigFromEnv() RetryConfig {
 	cfg := RetryConfig{}
 	if v := os.Getenv("AOEO_RETRY_MAX_RETRIES"); v != "" {

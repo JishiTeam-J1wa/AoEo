@@ -1,3 +1,11 @@
+// http.go 实现基于 HTTP/JSON 协议的 OPF sidecar 客户端，
+// 支持单条检测、批量检测、健康检查和自动重试。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-06
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
 package model
 
 import (
@@ -13,8 +21,8 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/core"
 )
 
-// HTTPClient calls an OpenAI Privacy Filter (OPF) sidecar via HTTP/JSON.
-// It is compatible with the gh0stkey/opf-privacy-filter service.
+// HTTPClient 通过 HTTP/JSON 协议调用 OpenAI Privacy Filter (OPF) sidecar。
+// 兼容 gh0stkey/opf-privacy-filter 服务。
 type HTTPClient struct {
 	baseURL string
 	client  *http.Client
@@ -22,25 +30,33 @@ type HTTPClient struct {
 	retries int
 }
 
-// HTTPClientOption configures an HTTPClient.
+// HTTPClientOption 配置 HTTPClient 的选项函数。
 type HTTPClientOption func(*HTTPClient)
 
-// WithTimeout sets the per-request timeout (default 10s).
-// OPF inference may be slower than simple regex detection.
+// WithTimeout 设置单次请求超时时间（默认 10 秒）。
+// OPF 模型推理可能比简单正则检测更慢，需要适当增大超时。
 func WithTimeout(d time.Duration) HTTPClientOption {
 	return func(c *HTTPClient) {
 		c.timeout = d
 	}
 }
 
-// WithRetries sets the number of retries on transient errors (default 2).
+// WithRetries 设置瞬态错误的重试次数（默认 2 次）。
 func WithRetries(n int) HTTPClientOption {
 	return func(c *HTTPClient) {
 		c.retries = n
 	}
 }
 
-// NewHTTPClient creates an HTTP client for the OPF privacy filter sidecar.
+// NewHTTPClient 创建 OPF 隐私过滤 sidecar 的 HTTP 客户端。
+// 使用连接池传输层以支持高并发场景，并启用 HTTP/2 多路复用。
+//
+// Param:
+//   - baseURL: string - OPF sidecar 的基础 URL 地址
+//   - opts: ...HTTPClientOption - 可选的客户端配置
+//
+// Return:
+//   - *HTTPClient: 初始化完成的 HTTP 客户端
 func NewHTTPClient(baseURL string, opts ...HTTPClientOption) *HTTPClient {
 	c := &HTTPClient{
 		baseURL: baseURL,
@@ -51,8 +67,8 @@ func NewHTTPClient(baseURL string, opts ...HTTPClientOption) *HTTPClient {
 		opt(c)
 	}
 
-	// Connection-pooled transport for high-concurrency scenarios.
-	// ForceAttemptHTTP2 ensures HTTP/2 multiplexing when the server supports it.
+	// 连接池传输层：支持高并发场景下的连接复用。
+	// ForceAttemptHTTP2 确保服务端支持时启用 HTTP/2 多路复用。
 	transport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
@@ -72,7 +88,7 @@ func NewHTTPClient(baseURL string, opts ...HTTPClientOption) *HTTPClient {
 }
 
 // ---------------------------------------------------------------------------
-// OPF API request / response types
+// OPF API 请求 / 响应类型
 // ---------------------------------------------------------------------------
 
 type opfRedactRequest struct {
@@ -112,11 +128,19 @@ type opfHealthResponse struct {
 }
 
 // ---------------------------------------------------------------------------
-// Detect (single text)
+// Detect（单条文本）
 // ---------------------------------------------------------------------------
 
-// Detect implements Client. Sends a single text to the OPF /redact endpoint
-// and returns the detected PII spans.
+// Detect 发送单段文本到 OPF /redact 端点，返回检测到的 PII 片段。
+// 支持自动重试，重试间隔为简单指数退避（100ms、200ms）。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，用于超时控制
+//   - text: string - 待检测的文本内容
+//
+// Return:
+//   - []Span: 检测到的敏感信息片段列表
+//   - error: 所有重试均失败时返回最后一次错误
 func (c *HTTPClient) Detect(ctx context.Context, text string) ([]Span, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.retries; attempt++ {
@@ -126,7 +150,7 @@ func (c *HTTPClient) Detect(ctx context.Context, text string) ([]Span, error) {
 		}
 		lastErr = err
 		if attempt < c.retries {
-			// Simple exponential backoff: 100ms, 200ms
+			// 简单指数退避：100ms、200ms
 			select {
 			case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
 			case <-ctx.Done():
@@ -192,11 +216,19 @@ func (c *HTTPClient) detectOnce(ctx context.Context, text string) ([]Span, error
 }
 
 // ---------------------------------------------------------------------------
-// DetectBatch (multiple texts)
+// DetectBatch（多条文本）
 // ---------------------------------------------------------------------------
 
-// DetectBatch implements Client by sending multiple texts to the OPF
-// /redact/batch endpoint in a single request.
+// DetectBatch 在单次请求中发送多段文本到 OPF /redact/batch 端点。
+// 单条文本时自动降级为 Detect 调用，避免不必要的批量请求开销。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文，用于超时控制
+//   - texts: []string - 待检测的文本列表
+//
+// Return:
+//   - [][]Span: 每段文本对应的检测结果列表
+//   - error: 请求失败时返回错误
 func (c *HTTPClient) DetectBatch(ctx context.Context, texts []string) ([][]Span, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -261,10 +293,18 @@ func (c *HTTPClient) DetectBatch(ctx context.Context, texts []string) ([][]Span,
 }
 
 // ---------------------------------------------------------------------------
-// HealthCheck
+// HealthCheck（健康检查）
 // ---------------------------------------------------------------------------
 
-// HealthCheck implements Client. It pings the OPF /health endpoint.
+// HealthCheck 向 OPF /health 端点发送健康检查请求。
+// 仅当状态为 "ok" 且模型已加载时返回 true。
+//
+// Param:
+//   - ctx: context.Context - 请求上下文
+//
+// Return:
+//   - bool: sidecar 就绪时返回 true
+//   - error: 请求或解析响应失败时返回错误
 func (c *HTTPClient) HealthCheck(ctx context.Context) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
 	if err != nil {
@@ -289,10 +329,10 @@ func (c *HTTPClient) HealthCheck(ctx context.Context) (bool, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// 辅助函数
 // ---------------------------------------------------------------------------
 
-// opfSpansToSpans converts OPF detected spans to our Span type.
+// opfSpansToSpans 将 OPF 检测到的片段转换为项目内部的 Span 类型。
 func opfSpansToSpans(opfSpans []opfSpan) []Span {
 	if len(opfSpans) == 0 {
 		return nil
@@ -304,64 +344,64 @@ func opfSpansToSpans(opfSpans []opfSpan) []Span {
 			Text:        s.Text,
 			Start:       s.Start,
 			End:         s.End,
-			Score:       1.0, // OPF does not provide per-span confidence scores
+			Score:       1.0, // OPF 不提供逐片段置信度分数
 			Placeholder: s.Placeholder,
 		})
 	}
 	return spans
 }
 
-// normalizeOPFLabel maps OPF model output labels to our entity type names.
-// OPF uses labels like "NAME", "EMAIL_ADDRESS", "PHONE_NUMBER", etc.
-// We normalize them to our EntityType constants: "person", "email", "phone", etc.
+// normalizeOPFLabel 将 OPF 模型输出标签映射为项目内部的实体类型名称。
+// OPF 使用 "NAME"、"EMAIL_ADDRESS"、"PHONE_NUMBER" 等标签，
+// 统一转换为 EntityType 常量："person"、"email"、"phone" 等。
 func normalizeOPFLabel(label string) string {
 	if mapped, ok := opfLabelMap[label]; ok {
 		return mapped
 	}
-	// Unknown labels default to "secret" (conservative strategy).
+	// 未知标签默认归为 "secret"（保守策略）。
 	return "secret"
 }
 
-// opfLabelMap maps OPF model output labels to AoEo entity types.
-// Covers OPF/Presidio labels and legacy sidecar labels for backward compatibility.
+// opfLabelMap 将 OPF 模型输出标签映射为 AoEo 实体类型。
+// 覆盖 OPF/Presidio 标签和旧版 sidecar 标签，保持向后兼容。
 var opfLabelMap = map[string]string{
-	// Person / Name
+	// 人名
 	"NAME":   "person",
 	"PERSON": "person",
 	"PER":    "person",
-	// Email
+	// 邮箱
 	"EMAIL_ADDRESS": "email",
 	"EMAIL":         "email",
-	// Phone
+	// 电话
 	"PHONE_NUMBER": "phone",
 	"PHONE":        "phone",
 	"TEL":          "phone",
-	// IP Address
+	// IP 地址
 	"IP_ADDRESS": "ip",
 	"IP":         "ip",
-	// Financial / Secret
+	// 金融/密钥
 	"CREDIT_CARD":       "secret",
 	"CRYPTO":            "secret",
 	"IBAN_CODE":         "secret",
 	"US_BANK_NUMBER":    "secret",
 	"MEDICAL_LICENSE":   "secret",
 	"SECRET":            "secret",
-	// ID Card / SSN
+	// 身份证/社保号
 	"US_DRIVER_LICENSE": "idcard",
 	"US_SSN":            "idcard",
 	"SSN":               "idcard",
 	"IDCARD":            "idcard",
 	"ID":                "idcard",
-	// URL / Domain
+	// URL / 域名
 	"URL":    "url",
 	"DOMAIN": "domain",
-	// Date
+	// 日期
 	"DATE_TIME": "date",
 	"DATE":      "date",
-	// Location / Address
+	// 位置 / 地址
 	"LOCATION": "address",
 	"ADDRESS":  "address",
 	"ADDR":     "address",
-	// Other
+	// 其他
 	"NRP": "secret",
 }

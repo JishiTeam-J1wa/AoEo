@@ -1,3 +1,11 @@
+// semaphore.go 实现支持动态容量调整的自适应信号量，使用 CAS 快速路径 + FIFO 等待队列。
+//
+// Author: JishiTeam-J1wa
+// Created: 2026-05
+//
+// Changelog:
+//   2026-06-12 - 注释体系规范化
+
 package engine
 
 import (
@@ -26,6 +34,12 @@ type adaptiveSemaphore struct {
 }
 
 // NewAdaptiveSemaphore 创建一个最大并发容量为 maxConc 的自适应信号量。
+//
+// Param:
+//   - maxConc: int - 最大并发容量，必须大于 0
+//
+// Return:
+//   - *adaptiveSemaphore: 新创建的信号量实例
 func NewAdaptiveSemaphore(maxConc int) *adaptiveSemaphore {
 	a := &adaptiveSemaphore{}
 	a.maxConc.Store(int32(maxConc))
@@ -33,6 +47,13 @@ func NewAdaptiveSemaphore(maxConc int) *adaptiveSemaphore {
 }
 
 // Acquire 获取 1 个并发槽位，等同于 AcquireN(ctx, 1)。
+//
+// Param:
+//   - ctx: context.Context - 控制等待超时，取消后返回 ctx.Err()
+//
+// Return:
+//   - nil: 成功获取槽位
+//   - error: 上下文取消时返回 ctx.Err()
 func (a *adaptiveSemaphore) Acquire(ctx context.Context) error {
 	return a.AcquireN(ctx, 1)
 }
@@ -40,16 +61,30 @@ func (a *adaptiveSemaphore) Acquire(ctx context.Context) error {
 // AcquireN 获取 n 个并发槽位。
 //
 // 快速路径（CAS）：
-//   在循环中尝试通过 CompareAndSwap（CAS）原子地增加 inUse。
-//   如果当前 inUse + n <= maxConc 且 CAS 成功，则直接返回，无需加锁。
-//   如果 CAS 失败（说明有其他协程同时修改了 inUse），则重试。
+//
+//	在循环中尝试通过 CompareAndSwap（CAS）原子地增加 inUse。
+//	如果当前 inUse + n <= maxConc 且 CAS 成功，则直接返回，无需加锁。
+//	如果 CAS 失败（说明有其他协程同时修改了 inUse），则重试。
 //
 // 慢速路径（FIFO 等待队列）：
-//   当 inUse + n > maxConc 时，说明当前没有足够的空闲槽位，
-//   协程需要加入 FIFO 等待队列并阻塞，直到被 Release 唤醒或上下文取消。
+//
+//	当 inUse + n > maxConc 时，说明当前没有足够的空闲槽位，
+//	协程需要加入 FIFO 等待队列并阻塞，直到被 Release 唤醒或上下文取消。
 //
 // 修复 SEM-01：在 CAS 失败到获取锁之间，可能有其他协程释放了槽位。
 // 因此获取锁后必须重新检查是否有空闲槽位，避免丢失唤醒信号导致永久阻塞。
+//
+// Param:
+//   - ctx: context.Context - 控制等待超时，取消后尝试从等待队列移除自身
+//   - n: int - 需要获取的并发槽位数，必须大于 0
+//
+// Return:
+//   - nil: 成功获取 n 个槽位
+//   - error: 上下文取消时返回 ctx.Err()
+//
+// Edge Cases:
+//   - 上下文在获取槽位后立即取消时，会归还已占用的槽位
+//   - 上下文取消时若已被唤醒（槽位已预留），会归还预留的槽位
 func (a *adaptiveSemaphore) AcquireN(ctx context.Context, n int) error {
 	// ---- 快速路径：尝试原子 CAS 操作避免加锁 ----
 	for {
@@ -122,6 +157,9 @@ func (a *adaptiveSemaphore) Release() {
 // 唤醒逻辑：从队列头部开始，依次检查是否有足够的空闲槽位来满足等待者，
 // 如果有则为该等待者预留槽位（原子增加 inUse）并发送唤醒信号。
 // 每次唤醒后重新获取锁以检查下一个等待者，保证在持锁状态下修改 inUse 的原子性。
+//
+// Param:
+//   - n: int - 要释放的并发槽位数，必须大于 0
 func (a *adaptiveSemaphore) ReleaseN(n int) {
 	// 先原子地减少 inUse（不使用锁，保证快速归还）
 	a.inUse.Add(-int32(n))
@@ -147,6 +185,9 @@ func (a *adaptiveSemaphore) ReleaseN(n int) {
 
 // setMaxConc 更新最大并发容量，并尝试唤醒因容量不足而阻塞的等待者。
 // 当管理员动态调大并发上限时，原先因容量不足而等待的协程可能现在可以被满足。
+//
+// Param:
+//   - n: int - 新的最大并发容量
 func (a *adaptiveSemaphore) setMaxConc(n int) {
 	a.maxConc.Store(int32(n))
 
