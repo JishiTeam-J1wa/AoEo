@@ -27,6 +27,12 @@ type Pricing struct {
 // Return:
 //   - float64: 总费用（prompt 费用 + completion 费用），定价均为 0 时返回 0
 func (u Usage) Cost(p Pricing) float64 {
+	if p.PromptPer1K < 0 {
+		p.PromptPer1K = 0
+	}
+	if p.CompletionPer1K < 0 {
+		p.CompletionPer1K = 0
+	}
 	if p.PromptPer1K == 0 && p.CompletionPer1K == 0 {
 		return 0
 	}
@@ -46,7 +52,7 @@ func (u Usage) Cost(p Pricing) float64 {
 func (u Usage) CostString(p Pricing) string {
 	currency := p.Currency
 	if currency == "" {
-		currency = "CNY"
+		return fmt.Sprintf("%.6f", u.Cost(p))
 	}
 	return fmt.Sprintf("%.6f %s", u.Cost(p), currency)
 }

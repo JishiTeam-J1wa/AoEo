@@ -52,6 +52,10 @@ func NewPostgres(dsn string) (core.Storage, error) {
 	// 避免使用已被中间设备关闭的"死连接"。
 	db.SetConnMaxLifetime(5 * time.Minute)
 
+	// SetConnMaxIdleTime(5 * time.Minute)：设置连接的最大空闲时间为 5 分钟。
+	// 超过此时间的空闲连接将被自动关闭，避免长期持有已被中间设备关闭的"死连接"。
+	db.SetConnMaxIdleTime(5 * time.Minute)
+
 	// 如果 Ping 失败，必须先关闭 db 再返回错误，否则已打开的连接池会造成资源泄露。
 	if err := db.Ping(); err != nil {
 		db.Close() // Bug S-17 修复：Ping 失败时关闭 db，防止资源泄露

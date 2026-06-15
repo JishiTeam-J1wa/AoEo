@@ -161,15 +161,23 @@ func (h *History) at(i int) CallRecord {
 func (h *History) Records() []CallRecord {
 	h.mu.RLock()
 	s := h.storage
-	h.mu.RUnlock()
-
 	if s != nil {
+		h.mu.RUnlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		crs, err := s.GetCalls(ctx, h.maxSize)
 		if err == nil {
 			return h.fromCoreCalls(crs)
 		}
+		// storage query failed, fall through to in-memory buffer
+	} else {
+		// no storage configured, read directly from in-memory buffer
+		defer h.mu.RUnlock()
+		result := make([]CallRecord, h.count)
+		for i := 0; i < h.count; i++ {
+			result[i] = h.at(i)
+		}
+		return result
 	}
 
 	h.mu.RLock()

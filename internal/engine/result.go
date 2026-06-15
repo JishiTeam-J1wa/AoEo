@@ -71,6 +71,14 @@ func ExtractJSON(content string, v any) error {
 		}
 	}
 
+	// 尝试提取顶层 JSON 数组
+	jsonArr := findFirstJSONArray(content)
+	if jsonArr != "" {
+		if err := json.Unmarshal([]byte(jsonArr), v); err == nil {
+			return nil
+		}
+	}
+
 	return fmt.Errorf("failed to extract JSON from content")
 }
 
@@ -118,6 +126,50 @@ func findFirstJSONObject(content string) string {
 	return content[start:end]
 }
 
+// findFirstJSONArray 扫描文本定位第一个完整的 JSON 数组。
+// 通过方括号深度计数 + 字符串内转义处理，确保提取的 JSON 数组边界正确。
+func findFirstJSONArray(content string) string {
+	start := strings.Index(content, "[")
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	end := -1
+	inString := false
+	escapeNext := false
+	for i := start; i < len(content); i++ {
+		c := content[i]
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+		if c == '\\' && inString {
+			escapeNext = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		if c == '[' {
+			depth++
+		} else if c == ']' {
+			depth--
+			if depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+	}
+	if end < 0 {
+		return ""
+	}
+	return content[start:end]
+}
+
 // ExtractField 使用正则表达式从文本中提取指定字段的字符串值。
 // 内部使用全局正则缓存（fieldRegexCache），首次查询某字段名时编译正则并缓存，
 // 后续查询直接复用，缓存上限由 fieldRegexCacheMax 控制。
@@ -134,7 +186,7 @@ func ExtractField(content, fieldName string) string {
 	fieldRegexCacheMu.RUnlock()
 
 	if !ok {
-		re = regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(fieldName) + `"\s*:\s*"(.*?)(?:"|,|\s*})`)
+		re = regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(fieldName) + `"\s*:\s*"([^"]*)"`)
 		fieldRegexCacheMu.Lock()
 		if len(fieldRegexCache) >= fieldRegexCacheMax {
 			count := 0
@@ -150,10 +202,18 @@ func ExtractField(content, fieldName string) string {
 		fieldRegexCacheMu.Unlock()
 	}
 
+	// 先尝试匹配字符串值
 	matches := re.FindStringSubmatch(content)
 	if len(matches) >= 2 {
 		return matches[1]
 	}
+
+	// 再尝试匹配非字符串值（数字、布尔、null）
+	reNonStr := regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(fieldName) + `"\s*:\s*([^,\s}\]]+)`)
+	if m := reNonStr.FindStringSubmatch(content); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+
 	return ""
 }
 

@@ -230,12 +230,33 @@ func (s *Scheduler) ChatCompleteStreamWithRouter(ctx context.Context, r core.Rou
 //   - 遇到 "[DONE]" 标记时正常关闭通道
 //   - 读取流发生错误时发送包含错误信息的 StreamChunk 后关闭
 func ParseSSE(r io.Reader) <-chan core.StreamChunk {
+	return ParseSSEWithContext(context.Background(), r)
+}
+
+// ParseSSEWithContext 解析原始 SSE（Server-Sent Events）数据流，支持通过 context 取消解析。
+// 适用于调试或代理 SSE 流的场景。
+//
+// Param:
+//   - ctx: context.Context - 控制解析生命周期，取消后停止解析并关闭通道
+//   - r: io.Reader - SSE 数据流（通常为 HTTP 响应体）
+//
+// Return:
+//   - <-chan core.StreamChunk: 解析后的数据块通道，流结束、出错或 ctx 取消后自动关闭
+//
+// Edge Cases:
+//   - 遇到 "[DONE]" 标记时正常关闭通道
+//   - 读取流发生错误时发送包含错误信息的 StreamChunk 后关闭
+//   - ctx 取消时立即停止解析并关闭通道
+func ParseSSEWithContext(ctx context.Context, r io.Reader) <-chan core.StreamChunk {
 	ch := make(chan core.StreamChunk, 8)
 	go func() {
 		defer close(ch)
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		for scanner.Scan() {
+			if ctx.Err() != nil {
+				return
+			}
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
 				continue
@@ -245,13 +266,20 @@ func ParseSSE(r io.Reader) <-chan core.StreamChunk {
 				return
 			}
 			// 最简解析，用户可自行通过 json.Unmarshal 扩展
-			ch <- core.StreamChunk{
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- core.StreamChunk{
 				Delta: core.Message{Content: data},
+			}:
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			ch <- core.StreamChunk{
+			select {
+			case <-ctx.Done():
+			case ch <- core.StreamChunk{
 				Delta: core.Message{Content: fmt.Sprintf("[SSE parse error: %v]", err)},
+			}:
 			}
 		}
 	}()

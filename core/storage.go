@@ -33,6 +33,15 @@ type Storage interface {
 	// GetCallsByProvider 按 Provider 名称过滤返回调用记录，最多 limit 条。
 	GetCallsByProvider(ctx context.Context, provider string, limit int) ([]CallRecord, error)
 
+	// GetCallsPaged 返回从 offset 开始的 limit 条调用记录（offset=0 为最新）。
+	GetCallsPaged(ctx context.Context, offset, limit int) ([]CallRecord, error)
+
+	// GetCallsByTagPaged 按标签过滤返回从 offset 开始的 limit 条调用记录（offset=0 为最新）。
+	GetCallsByTagPaged(ctx context.Context, tag string, offset, limit int) ([]CallRecord, error)
+
+	// GetCallsByProviderPaged 按 Provider 名称过滤返回从 offset 开始的 limit 条调用记录（offset=0 为最新）。
+	GetCallsByProviderPaged(ctx context.Context, provider string, offset, limit int) ([]CallRecord, error)
+
 	// GetProviderStats 按 Provider 聚合费用统计信息。
 	GetProviderStats(ctx context.Context) (map[string]ProviderStats, error)
 

@@ -38,10 +38,15 @@ func NewSQLite(dsn string) (core.Storage, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// 如果是内存数据库（":memory:"），必须将最大连接数限制为 1。
-	// 原因：SQLite 的 :memory: 数据库是每个连接独立的，多个连接会各自拥有独立的数据库实例，
-	// 导致写入和读取可能不在同一个数据库上，造成数据不一致。
-	if strings.Contains(dsn, ":memory:") {
+	// 判断是否为内存数据库：精确匹配 ":memory:"、"mode=memory" 或 "file::memory:" 格式。
+	// 内存数据库每个连接拥有独立的数据库实例，必须限制最大连接数为 1 以保证数据一致性。
+	isMemory := dsn == ":memory:" || strings.Contains(dsn, "mode=memory") || strings.Contains(dsn, "file::memory:")
+	if isMemory {
+		db.SetMaxOpenConns(1)
+	}
+
+	// 文件型 SQLite 同样限制为单连接写入，匹配 SQLite 的单写者模型。
+	if !isMemory {
 		db.SetMaxOpenConns(1)
 	}
 

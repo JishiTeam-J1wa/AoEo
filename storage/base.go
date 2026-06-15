@@ -284,6 +284,109 @@ func (s *sqlStorage) GetCallsByProvider(ctx context.Context, provider string, li
 	return s.scanCalls(rows, limit)
 }
 
+// GetCallsPaged 返回从 offset 开始的 limit 条调用记录（offset=0 为最新）。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - offset: int - 跳过的记录数（从最新记录开始计算），< 0 时按 0 处理
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.CallRecord: 按时间从新到旧排序的调用记录切片
+//   - error: 查询失败时返回错误
+func (s *sqlStorage) GetCallsPaged(ctx context.Context, offset, limit int) ([]core.CallRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency FROM calls ORDER BY timestamp DESC LIMIT "+s.ph(1)+" OFFSET "+s.ph(2),
+		limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return s.scanCalls(rows, limit)
+}
+
+// GetCallsByTagPaged 按标签过滤返回从 offset 开始的 limit 条调用记录（offset=0 为最新）。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - tag: string - 待搜索的标签名称
+//   - offset: int - 跳过的记录数（从最新记录开始计算），< 0 时按 0 处理
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.CallRecord: 按时间从新到旧排序的调用记录切片
+//   - error: 查询失败时返回错误
+func (s *sqlStorage) GetCallsByTagPaged(ctx context.Context, tag string, offset, limit int) ([]core.CallRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	escapedTag := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(tag)
+	pattern := "%" + escapedTag + "%"
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency FROM calls WHERE tags_json LIKE "+s.ph(1)+" ORDER BY timestamp DESC LIMIT "+s.ph(2)+" OFFSET "+s.ph(3),
+		pattern, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result, err := s.scanCalls(rows, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Go 层二次过滤：LIKE 子串匹配可能误中，精确比对反序列化后的 Tags 切片。
+	var filtered []core.CallRecord
+	for _, r := range result {
+		for _, t := range r.Tags {
+			if t == tag {
+				filtered = append(filtered, r)
+				break
+			}
+		}
+	}
+	return filtered, nil
+}
+
+// GetCallsByProviderPaged 按 Provider 名称过滤返回从 offset 开始的 limit 条调用记录（offset=0 为最新）。
+//
+// Param:
+//   - ctx: context.Context - 用于超时控制和取消
+//   - provider: string - 服务提供商名称
+//   - offset: int - 跳过的记录数（从最新记录开始计算），< 0 时按 0 处理
+//   - limit: int - 返回的最大记录数，若 <= 0 则默认返回 100 条
+//
+// Return:
+//   - []core.CallRecord: 按时间从新到旧排序的调用记录切片
+//   - error: 查询失败时返回错误
+func (s *sqlStorage) GetCallsByProviderPaged(ctx context.Context, provider string, offset, limit int) ([]core.CallRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency FROM calls WHERE provider = "+s.ph(1)+" ORDER BY timestamp DESC LIMIT "+s.ph(2)+" OFFSET "+s.ph(3),
+		provider, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return s.scanCalls(rows, limit)
+}
+
 // GetProviderStats 获取各服务提供商的统计信息。
 // 它通过一条聚合 SQL 按 provider 和 currency 分组，计算以下指标：
 //   - COUNT(*)：总调用次数

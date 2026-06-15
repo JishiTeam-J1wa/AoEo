@@ -118,6 +118,18 @@ func (req ChatCompletionRequest) Validate() []string {
 			// assistant 消息可以为空（例如工具调用），tool 消息使用 tool_call_id
 			issues = append(issues, fmt.Sprintf("message[%d]: content is required", i))
 		}
+		if m.Role == "system" && i != 0 {
+			issues = append(issues, fmt.Sprintf("message[%d]: system message should be the first message", i))
+		}
+	}
+	systemCount := 0
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			systemCount++
+		}
+	}
+	if systemCount > 1 {
+		issues = append(issues, fmt.Sprintf("found %d system messages, at most 1 is allowed", systemCount))
 	}
 	if req.Temperature < 0 || req.Temperature > 2 {
 		issues = append(issues, "temperature must be between 0 and 2")
@@ -257,6 +269,10 @@ func (req ChatCompletionRequest) Clone() ChatCompletionRequest {
 		for k, v := range req.Metadata {
 			cloned.Metadata[k] = v
 		}
+	}
+	if len(req.Stop) > 0 {
+		cloned.Stop = make([]string, len(req.Stop))
+		copy(cloned.Stop, req.Stop)
 	}
 	return cloned
 }

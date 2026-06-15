@@ -1107,8 +1107,12 @@ func TestUsage_CostString_DefaultCurrency(t *testing.T) {
 	u := Usage{PromptTokens: 1000, CompletionTokens: 1000}
 	p := Pricing{PromptPer1K: 1.0, CompletionPer1K: 2.0}
 	s := u.CostString(p)
-	if !strings.Contains(s, "CNY") {
-		t.Fatalf("expected default currency CNY, got %s", s)
+	// 货币为空时不附加任何货币单位，仅返回数字
+	if strings.Contains(s, "CNY") || strings.Contains(s, "USD") {
+		t.Fatalf("expected no currency suffix when currency is empty, got %s", s)
+	}
+	if !strings.HasPrefix(s, "3.000000") {
+		t.Fatalf("expected cost 3.000000, got %s", s)
 	}
 	// Verify Pricing was not mutated
 	if p.Currency != "" {

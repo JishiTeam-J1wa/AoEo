@@ -22,6 +22,9 @@ type Option func(*core.ChatCompletionRequest)
 //   - prompt: string - 系统提示词内容，不可为空
 func WithSystemPrompt(prompt string) Option {
 	return func(req *core.ChatCompletionRequest) {
+		if prompt == "" {
+			return // 忽略空 system prompt
+		}
 		for i := range req.Messages {
 			if req.Messages[i].Role == "system" {
 				req.Messages[i].Content = prompt
@@ -38,6 +41,12 @@ func WithSystemPrompt(prompt string) Option {
 //   - t: float32 - 温度值，有效范围 0~2；值越高生成结果越随机，值越低越确定
 func WithTemperature(t float32) Option {
 	return func(req *core.ChatCompletionRequest) {
+		if t < 0 {
+			t = 0
+		}
+		if t > 2 {
+			t = 2
+		}
 		req.Temperature = t
 	}
 }
@@ -77,6 +86,12 @@ func WithModel(model string) Option {
 //   - p: float32 - TopP 值，有效范围 0~1；仅从累积概率达到 p 的最小 Token 集合中采样
 func WithTopP(p float32) Option {
 	return func(req *core.ChatCompletionRequest) {
+		if p < 0 {
+			p = 0
+		}
+		if p > 1 {
+			p = 1
+		}
 		req.TopP = p
 	}
 }
@@ -87,6 +102,12 @@ func WithTopP(p float32) Option {
 //   - p: float32 - 惩罚系数，有效范围 -2.0~2.0；正值惩罚已出现的 Token，负值鼓励重复
 func WithPresencePenalty(p float32) Option {
 	return func(req *core.ChatCompletionRequest) {
+		if p < -2 {
+			p = -2
+		}
+		if p > 2 {
+			p = 2
+		}
 		req.PresencePenalty = p
 	}
 }
@@ -97,6 +118,12 @@ func WithPresencePenalty(p float32) Option {
 //   - p: float32 - 惩罚系数，有效范围 -2.0~2.0；正值按出现频率惩罚，负值鼓励高频词
 func WithFrequencyPenalty(p float32) Option {
 	return func(req *core.ChatCompletionRequest) {
+		if p < -2 {
+			p = -2
+		}
+		if p > 2 {
+			p = 2
+		}
 		req.FrequencyPenalty = p
 	}
 }

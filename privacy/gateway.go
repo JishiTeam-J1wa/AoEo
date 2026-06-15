@@ -328,7 +328,7 @@ func (g *Gateway) AfterStreamChunk(ctx context.Context, req core.ChatCompletionR
 // Return:
 //   - error: 当前始终返回 nil
 func (g *Gateway) AfterStreamDone(ctx context.Context, req core.ChatCompletionRequest, err error) error {
-	// 预留：审计日志、会话清理等功能
+	// TODO(JishiTeam-J1wa, 2026-06): 实现审计日志记录和会话清理
 	return nil
 }
 

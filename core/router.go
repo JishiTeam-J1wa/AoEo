@@ -203,7 +203,7 @@ type RandomRouter struct{}
 //   - int: 随机选中的 Provider 索引
 //   - error: 无可用 Provider 时返回
 func (r *RandomRouter) Select(ctx context.Context, candidates []ProviderStatus, req ChatCompletionRequest) (int, error) {
-	var avail []int
+	avail := make([]int, 0, len(candidates))
 	for i, c := range candidates {
 		if c.Available {
 			avail = append(avail, i)

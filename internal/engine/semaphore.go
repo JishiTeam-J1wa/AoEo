@@ -10,6 +10,7 @@ package engine
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -87,6 +88,7 @@ func (a *adaptiveSemaphore) Acquire(ctx context.Context) error {
 //   - 上下文取消时若已被唤醒（槽位已预留），会归还预留的槽位
 func (a *adaptiveSemaphore) AcquireN(ctx context.Context, n int) error {
 	// ---- 快速路径：尝试原子 CAS 操作避免加锁 ----
+	retries := 0
 	for {
 		current := a.inUse.Load()
 		maxC := a.maxConc.Load()
@@ -97,6 +99,10 @@ func (a *adaptiveSemaphore) AcquireN(ctx context.Context, n int) error {
 			return nil // CAS 成功，快速路径获取槽位成功
 		}
 		// CAS 失败（其他协程同时修改了 inUse），重试快速路径
+		retries++
+		if retries%4 == 0 {
+			runtime.Gosched()
+		}
 	}
 
 	// ---- 慢速路径：加锁后加入 FIFO 等待队列 ----

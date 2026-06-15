@@ -50,6 +50,10 @@ func NewMySQL(dsn string) (core.Storage, error) {
 	// 确保客户端主动回收过期连接，避免使用被服务端已关闭的连接导致 "bad connection" 错误。
 	db.SetConnMaxLifetime(3 * time.Minute)
 
+	// SetConnMaxIdleTime(5 * time.Minute)：设置连接的最大空闲时间为 5 分钟。
+	// 超过此时间的空闲连接将被自动关闭，避免长期持有已被服务端回收的连接。
+	db.SetConnMaxIdleTime(5 * time.Minute)
+
 	// 如果 Ping 失败，必须先关闭 db 再返回错误，否则已打开的连接池会造成资源泄露。
 	if err := db.Ping(); err != nil {
 		db.Close() // Bug S-14 修复：Ping 失败时关闭 db，防止资源泄露

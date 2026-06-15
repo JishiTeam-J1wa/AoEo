@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -445,6 +446,8 @@ func buildHTTPClient(config core.ProviderConfig) *http.Client {
 
 	// 如果配置了跳过 TLS 验证，则应用 TLS 设置。
 	if config.SkipTLSVerify {
+		core.GetLogger().Warn("TLS 证书验证已禁用，存在中间人攻击风险，仅建议在受信任网络中使用",
+			"provider", config.Name)
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{}
 		}
@@ -505,10 +508,8 @@ func buildOpenAIMessages(messages []core.Message) []openai.ChatCompletionMessage
 						Arguments: tc.Function.Arguments,
 					},
 				}
-				if tc.Index > 0 {
-					idx := tc.Index
-					result[i].ToolCalls[j].Index = &idx
-				}
+				idx := tc.Index
+				result[i].ToolCalls[j].Index = &idx
 			}
 		}
 	}
@@ -758,7 +759,7 @@ func (p *OpenAIProvider) ChatComplete(ctx context.Context, req core.ChatCompleti
 				"panic", r)
 			p.RecordFailure()
 			p.RecordCallResult(latencyMs, fmt.Errorf("panic: %v", r))
-			err = fmt.Errorf("provider panic: %v", r)
+			err = fmt.Errorf("provider panic: %v\n%s", r, debug.Stack())
 			return
 		}
 		if err != nil {

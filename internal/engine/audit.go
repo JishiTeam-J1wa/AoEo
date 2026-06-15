@@ -62,12 +62,13 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 		pi.Inject(primaryProvider.Name(), reqCopy.Model, &reqCopy)
 	}
 
-	auditCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
-	defer cancel()
-
 	start := time.Now()
 
-	if err := s.sem.Acquire(auditCtx); err != nil {
+	// 主 Provider 独立超时
+	primaryCtx, primaryCancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
+	defer primaryCancel()
+
+	if err := s.sem.Acquire(primaryCtx); err != nil {
 		return nil, err
 	}
 	primary, err := func() (result *core.ChatCompletionResponse, err error) {
@@ -77,7 +78,7 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 				err = fmt.Errorf("primary provider panic: %v", r)
 			}
 		}()
-		result, err = primaryProvider.ChatComplete(auditCtx, reqCopy)
+		result, err = primaryProvider.ChatComplete(primaryCtx, reqCopy)
 		return
 	}()
 	s.sem.Release()
@@ -105,6 +106,9 @@ func (s *Scheduler) Audit(ctx context.Context, req core.ChatCompletionRequest) (
 		if pi := s.promptInjector.Load(); pi != nil {
 			pi.Inject(auditProvider.Name(), auditReqCopy.Model, &auditReqCopy)
 		}
+		// 审计 Provider 独立超时
+		auditCtx, auditCancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
+		defer auditCancel()
 		if err := s.sem.Acquire(auditCtx); err != nil {
 			return nil, err
 		}

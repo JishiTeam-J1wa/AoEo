@@ -26,12 +26,17 @@ type NopEmitter struct{}
 
 func (NopEmitter) Emit(string, ...any) {}
 
+// EventTopic 是事件主题标识的类型别名，用于在文档层面约束事件主题常量。
+// 当前保持为 string 类型以兼容 EventEmitter.Emit 接口签名。
+type EventTopic = string
+
 // 调度器事件主题常量。
+// 所有常量均为 EventTopic（即 string）类型，供 EventEmitter.Emit 使用。
 const (
-	EventProviderFail    = "provider:fail"
-	EventProviderOpen    = "provider:open"
-	EventProviderRecover = "provider:recover"
-	EventFallbackTrigger = "scheduler:fallback"
-	EventAuditDisagree   = "audit:disagree"
-	EventDualComplete    = "scheduler:dual"
+	EventProviderFail    EventTopic = "provider:fail"
+	EventProviderOpen    EventTopic = "provider:open"
+	EventProviderRecover EventTopic = "provider:recover"
+	EventFallbackTrigger EventTopic = "scheduler:fallback"
+	EventAuditDisagree   EventTopic = "audit:disagree"
+	EventDualComplete    EventTopic = "scheduler:dual"
 )

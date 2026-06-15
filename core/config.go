@@ -73,6 +73,12 @@ func ValidateConfig(cfg ProviderConfig) []string {
 	if cfg.MaxConcurrent < 0 {
 		issues = append(issues, "maxConcurrent must be >= 0")
 	}
+	if cfg.MaxFailures < 0 {
+		issues = append(issues, "maxFailures must be >= 0")
+	}
+	if cfg.CooldownDuration < 0 {
+		issues = append(issues, "cooldownDuration must be >= 0")
+	}
 
 	return issues
 }
@@ -99,9 +105,14 @@ func (cfg ProviderConfig) MarshalJSON() ([]byte, error) {
 //   - map[string][]string: Provider 名称到错误列表的映射，空 map 表示全部有效
 func (cfg Config) Validate() map[string][]string {
 	result := make(map[string][]string)
+	seen := make(map[string]bool)
 	for _, pc := range cfg.Providers {
+		if seen[pc.Name] {
+			result[pc.Name] = append(result[pc.Name], fmt.Sprintf("duplicate provider name: %q", pc.Name))
+		}
+		seen[pc.Name] = true
 		if issues := ValidateConfig(pc); len(issues) > 0 {
-			result[pc.Name] = issues
+			result[pc.Name] = append(result[pc.Name], issues...)
 		}
 	}
 	return result

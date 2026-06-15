@@ -46,6 +46,11 @@ import (
 //   - cfg 中的延迟/乘数使用零值时自动填充默认值（500ms / 5s / 2.0）
 //   - retryable 未配置时默认使用 core.IsRetryableError 判断
 func DoRetry(ctx context.Context, cfg core.RetryConfig, fn func() error) error {
+	// 首次执行前检查 context
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	maxRetries := cfg.MaxRetries
 	if maxRetries <= 0 {
 		return fn()

@@ -63,6 +63,10 @@ func (pi *PromptInjector) SetTemplates(tmpls []PromptTemplate) {
 func (pi *PromptInjector) Clear() {
 	pi.mu.Lock()
 	defer pi.mu.Unlock()
+	// nil out elements to help GC
+	for i := range pi.templates {
+		pi.templates[i] = PromptTemplate{}
+	}
 	pi.templates = pi.templates[:0]
 }
 

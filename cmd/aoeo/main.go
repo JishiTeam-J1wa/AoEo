@@ -11,7 +11,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -107,7 +106,8 @@ func cmdListModels(args []string) {
 
 	client, err := loadClient()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	defer client.Close()
 
@@ -142,7 +142,8 @@ func cmdTest(args []string) {
 
 	client, err := loadClient()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	defer client.Close()
 
@@ -177,7 +178,8 @@ func cmdStatus(args []string) {
 
 	client, err := loadClient()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	defer client.Close()
 
@@ -212,7 +214,8 @@ func cmdChat(args []string) {
 	model := fs.String("model", "", "Target model (optional)")
 	temp := fs.Float64("temperature", 0.7, "Sampling temperature")
 	if err := fs.Parse(args); err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	if *msg == "" {
 		fmt.Fprintln(os.Stderr, "Error: -message is required")
@@ -222,7 +225,8 @@ func cmdChat(args []string) {
 
 	client, err := loadClient()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	defer client.Close()
 
@@ -244,7 +248,8 @@ func cmdChat(args []string) {
 		resp, err = client.ChatComplete(ctx, req)
 	}
 	if err != nil {
-		log.Fatalf("chat complete: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: chat complete: %v\n", err)
+		os.Exit(1)
 	}
 	fmt.Println(resp.Content())
 }
@@ -258,7 +263,8 @@ func cmdStream(args []string) {
 	model := fs.String("model", "", "Target model (optional)")
 	temp := fs.Float64("temperature", 0.7, "Sampling temperature")
 	if err := fs.Parse(args); err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	if *msg == "" {
 		fmt.Fprintln(os.Stderr, "Error: -message is required")
@@ -268,7 +274,8 @@ func cmdStream(args []string) {
 
 	client, err := loadClient()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 	defer client.Close()
 
@@ -290,15 +297,25 @@ func cmdStream(args []string) {
 		stream, err = client.ChatCompleteStream(ctx, req)
 	}
 	if err != nil {
-		log.Fatalf("stream: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: stream: %v\n", err)
+		os.Exit(1)
 	}
+	var lastUsage core.Usage
 	for chunk := range stream {
 		if chunk.Err != nil {
-			log.Fatalf("stream error: %v", chunk.Err)
+			fmt.Fprintf(os.Stderr, "Error: stream error: %v\n", chunk.Err)
+			os.Exit(1)
+		}
+		if chunk.Usage.TotalTokens > 0 {
+			lastUsage = chunk.Usage
 		}
 		fmt.Print(chunk.Chunk.Delta.Content)
 	}
 	fmt.Println()
+	if lastUsage.TotalTokens > 0 {
+		fmt.Fprintf(os.Stderr, "\n---\nTokens: %d prompt + %d completion = %d total\n",
+			lastUsage.PromptTokens, lastUsage.CompletionTokens, lastUsage.TotalTokens)
+	}
 }
 
 // cmdPrivacy 处理 privacy 子命令，检查隐私过滤 Sidecar 的运行状态和统计信息。

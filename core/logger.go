@@ -57,3 +57,13 @@ func SetLogger(l Logger) {
 func GetLogger() Logger {
 	return *aoLogger.Load()
 }
+
+// NewDebugLogger 创建一个输出到 Stderr 的 Debug 级别日志器，适合开发调试。
+//
+// Return:
+//   - Logger: Debug 级别的 JSON 格式日志实例
+func NewDebugLogger() Logger {
+	return &defaultLogger{
+		inner: slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+}
