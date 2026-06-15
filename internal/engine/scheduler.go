@@ -304,6 +304,10 @@ func (s *Scheduler) Close() error {
 
 	s.stopHealthCheck()
 
+	if s.history != nil {
+		s.history.Close()
+	}
+
 	s.mu.RLock()
 	allProvs := s.providers
 	s.mu.RUnlock()
@@ -530,6 +534,7 @@ func (s *Scheduler) ChatCompleteWithFallback(ctx context.Context, req core.ChatC
 
 	// 在回退循环之前仅执行一次拦截器的 BeforeRequest 钩子
 	chain := s.interceptorChain()
+	req = req.Clone()
 	if err := chain.ApplyBefore(ctx, &req); err != nil {
 		return nil, err
 	}
@@ -755,7 +760,10 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 		if pi := s.promptInjector.Load(); pi != nil {
 			pi.Inject(p1.Name(), req1.Model, &req1)
 		}
-		s.history.Record(s.buildRecord(p1, req1, o1.resp, start, o1.err, append(req.Tags, "dual"), ""))
+		tags1 := make([]string, len(req.Tags)+1)
+		copy(tags1, req.Tags)
+		tags1[len(req.Tags)] = "dual"
+		s.history.Record(s.buildRecord(p1, req1, o1.resp, start, o1.err, tags1, ""))
 
 		req2 := req.Clone()
 		if req2.Model == "" {
@@ -764,7 +772,10 @@ func (s *Scheduler) ChatCompleteDual(ctx context.Context, req core.ChatCompletio
 		if pi := s.promptInjector.Load(); pi != nil {
 			pi.Inject(p2.Name(), req2.Model, &req2)
 		}
-		s.history.Record(s.buildRecord(p2, req2, o2.resp, start, o2.err, append(req.Tags, "dual"), ""))
+		tags2 := make([]string, len(req.Tags)+1)
+		copy(tags2, req.Tags)
+		tags2[len(req.Tags)] = "dual"
+		s.history.Record(s.buildRecord(p2, req2, o2.resp, start, o2.err, tags2, ""))
 	}
 
 	dual := &core.DualResult{Result1: o1.resp, Result2: o2.resp}
@@ -897,6 +908,98 @@ func (s *Scheduler) pickWithRouter(ctx context.Context, req core.ChatCompletionR
 	p := s.providers[availableIdx[0]]
 	s.mu.RUnlock()
 	return p, nil
+}
+
+// pickWithSpecificRouter 使用指定的路由器选择 Provider，而非全局路由器。
+// 用于 ChatCompleteWithRouter 等线程安全的调用路径。
+func (s *Scheduler) pickWithSpecificRouter(ctx context.Context, r core.Router, req core.ChatCompletionRequest) (providers.Provider, error) {
+	status := s.ProviderStatus()
+	var availableIdx []int
+	for i, st := range status {
+		if st.Available {
+			availableIdx = append(availableIdx, i)
+		}
+	}
+	if len(availableIdx) == 0 {
+		return nil, ErrNoAvailableProvider
+	}
+
+	idx, err := r.Select(ctx, status, req)
+	if err == nil && idx >= 0 && idx < len(status) && status[idx].Available {
+		s.mu.RLock()
+		p := s.providers[idx]
+		s.mu.RUnlock()
+		return p, nil
+	}
+
+	// 回退到主 Provider（首个可用的）
+	s.mu.RLock()
+	p := s.providers[availableIdx[0]]
+	s.mu.RUnlock()
+	return p, nil
+}
+
+// chatCompleteWithRouter 使用指定路由器执行单次补全，不修改全局路由状态。
+func (s *Scheduler) chatCompleteWithRouter(ctx context.Context, r core.Router, req core.ChatCompletionRequest) (resp *core.ChatCompletionResponse, err error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+	if err := s.sem.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer s.sem.Release()
+
+	p, err := s.pickWithSpecificRouter(ctx, r, req)
+	if err != nil {
+		return nil, err
+	}
+
+	reqCopy := req.Clone()
+	if reqCopy.Model == "" {
+		reqCopy.Model = p.Config().Model
+	}
+
+	if pi := s.promptInjector.Load(); pi != nil {
+		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
+	}
+
+	chain := s.interceptorChain()
+	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
+		return nil, err
+	}
+
+	providerCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
+	defer cancel()
+
+	start := time.Now()
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			core.GetLogger().Error("scheduler chatCompleteWithRouter panic recovered", "panic", rec)
+			err = fmt.Errorf("provider panic: %v", rec)
+		}
+		if s.history != nil {
+			s.history.Record(s.buildRecord(p, reqCopy, resp, start, err, req.Tags, ""))
+		}
+		resp, err = chain.ApplyAfter(ctx, reqCopy, resp, err)
+	}()
+
+	if s.retry.MaxRetries > 0 {
+		err = DoRetry(providerCtx, s.retry, func() error {
+			var innerErr error
+			resp, innerErr = p.ChatComplete(providerCtx, reqCopy)
+			return innerErr
+		})
+	} else {
+		resp, err = p.ChatComplete(providerCtx, reqCopy)
+	}
+
+	return resp, err
+}
+
+// ChatCompleteWithRouter 使用指定路由器执行补全，线程安全。
+func (s *Scheduler) ChatCompleteWithRouter(ctx context.Context, r core.Router, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
+	return s.chatCompleteWithRouter(ctx, r, req)
 }
 
 // ProviderStatus 返回每个已配置 Provider 的运行时状态。

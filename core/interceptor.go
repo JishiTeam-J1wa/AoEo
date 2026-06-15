@@ -7,7 +7,10 @@
 //   2026-06-12 - 注释体系规范化
 package core
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Interceptor 提供请求/响应生命周期的拦截钩子。
 //
@@ -50,12 +53,20 @@ type InterceptorChain []Interceptor
 //
 // Return:
 //   - error: 首个钩子返回的错误，全部成功时为 nil
-func (chain InterceptorChain) ApplyBefore(ctx context.Context, req *ChatCompletionRequest) error {
+func (chain InterceptorChain) ApplyBefore(ctx context.Context, req *ChatCompletionRequest) (err error) {
 	for _, ic := range chain {
 		if ic.BeforeRequest == nil {
 			continue
 		}
-		if err := ic.BeforeRequest(ctx, req); err != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("interceptor BeforeRequest panic: %v", r)
+				}
+			}()
+			err = ic.BeforeRequest(ctx, req)
+		}()
+		if err != nil {
 			return err
 		}
 	}
@@ -80,7 +91,15 @@ func (chain InterceptorChain) ApplyAfter(ctx context.Context, req ChatCompletion
 		if ic.AfterResponse == nil {
 			continue
 		}
-		resp, err = ic.AfterResponse(ctx, req, resp, err)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("interceptor AfterResponse panic: %v", r)
+					resp = nil
+				}
+			}()
+			resp, err = ic.AfterResponse(ctx, req, resp, err)
+		}()
 	}
 	return resp, err
 }
@@ -96,12 +115,20 @@ func (chain InterceptorChain) ApplyAfter(ctx context.Context, req ChatCompletion
 //
 // Return:
 //   - error: 首个钩子返回的错误，全部成功时为 nil
-func (chain InterceptorChain) ApplyAfterStreamChunk(ctx context.Context, req ChatCompletionRequest, chunk *StreamChunk) error {
+func (chain InterceptorChain) ApplyAfterStreamChunk(ctx context.Context, req ChatCompletionRequest, chunk *StreamChunk) (err error) {
 	for _, ic := range chain {
 		if ic.AfterStreamChunk == nil {
 			continue
 		}
-		if err := ic.AfterStreamChunk(ctx, req, chunk); err != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("interceptor AfterStreamChunk panic: %v", r)
+				}
+			}()
+			err = ic.AfterStreamChunk(ctx, req, chunk)
+		}()
+		if err != nil {
 			return err
 		}
 	}
@@ -124,9 +151,16 @@ func (chain InterceptorChain) ApplyAfterStreamDone(ctx context.Context, req Chat
 		if ic.AfterStreamDone == nil {
 			continue
 		}
-		if e := ic.AfterStreamDone(ctx, req, err); e != nil {
-			err = e
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("interceptor AfterStreamDone panic: %v", r)
+				}
+			}()
+			if e := ic.AfterStreamDone(ctx, req, err); e != nil {
+				err = e
+			}
+		}()
 	}
 	return err
 }

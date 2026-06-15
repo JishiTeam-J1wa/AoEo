@@ -116,43 +116,65 @@ func EnvConfigString(envVar string) ProviderConfig {
 // Param:
 //   - cfg: Config - 待写入的配置对象
 func SetEnvConfig(cfg Config) {
+	SetEnvConfigWithPrefix("AOEO", cfg)
+}
+
+// SetEnvConfigWithPrefix 使用自定义前缀将 Config 写入环境变量。
+// 写入前会先清理同前缀的残留环境变量，防止先前配置遗留。
+//
+// Param:
+//   - prefix: string - 环境变量前缀，如 "AOEO"、"MYAPP"
+//   - cfg: Config - 待写入的配置对象
+func SetEnvConfigWithPrefix(prefix string, cfg Config) {
+	// 先清理同前缀的残留环境变量，防止先前配置遗留
+	UnsetEnvConfigWithPrefix(prefix)
 	for i, pc := range cfg.Providers {
-		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
-		os.Setenv(prefix+"NAME", pc.Name)
-		os.Setenv(prefix+"API_KEY", pc.APIKey)
-		os.Setenv(prefix+"ENDPOINT", pc.Endpoint)
-		os.Setenv(prefix+"MODEL", pc.Model)
+		p := fmt.Sprintf("%s_PROVIDER_%d_", prefix, i)
+		os.Setenv(p+"NAME", pc.Name)
+		os.Setenv(p+"API_KEY", pc.APIKey)
+		os.Setenv(p+"ENDPOINT", pc.Endpoint)
+		os.Setenv(p+"MODEL", pc.Model)
 		if pc.MaxConcurrent > 0 {
-			os.Setenv(prefix+"MAX_CONCURRENT", strconv.Itoa(pc.MaxConcurrent))
+			os.Setenv(p+"MAX_CONCURRENT", strconv.Itoa(pc.MaxConcurrent))
 		}
 		if pc.SkipTLSVerify {
-			os.Setenv(prefix+"SKIP_TLS_VERIFY", "true")
+			os.Setenv(p+"SKIP_TLS_VERIFY", "true")
 		}
 		if pc.Proxy != "" {
-			os.Setenv(prefix+"PROXY", pc.Proxy)
+			os.Setenv(p+"PROXY", pc.Proxy)
 		}
 	}
 	if cfg.AuditEnabled {
-		os.Setenv("AOEO_AUDIT_ENABLED", "true")
+		os.Setenv(prefix+"_AUDIT_ENABLED", "true")
 	}
 }
 
 // UnsetEnvConfig 清除由 SetEnvConfig 设置的所有 AOEO_ 环境变量。
 //
 // Param:
-//   - cfg: Config - 用于确定需清除的 Provider 索引范围
+//   - cfg: Config - 用于确定需清除的 Provider 索引范围（保留向后兼容，实际按环境变量扫描清除）
 func UnsetEnvConfig(cfg Config) {
-	for i := range cfg.Providers {
-		prefix := fmt.Sprintf("AOEO_PROVIDER_%d_", i)
-		os.Unsetenv(prefix + "NAME")
-		os.Unsetenv(prefix + "API_KEY")
-		os.Unsetenv(prefix + "ENDPOINT")
-		os.Unsetenv(prefix + "MODEL")
-		os.Unsetenv(prefix + "MAX_CONCURRENT")
-		os.Unsetenv(prefix + "SKIP_TLS_VERIFY")
-		os.Unsetenv(prefix + "PROXY")
+	UnsetEnvConfigWithPrefix("AOEO")
+}
+
+// UnsetEnvConfigWithPrefix 清除指定前缀的所有 AoEo 环境变量。
+// 通过扫描环境变量实现，无需知晓 Provider 数量。
+//
+// Param:
+//   - prefix: string - 环境变量前缀
+func UnsetEnvConfigWithPrefix(prefix string) {
+	providerPrefix := prefix + "_PROVIDER_"
+	auditKey := prefix + "_AUDIT_ENABLED"
+	for _, env := range os.Environ() {
+		kv := strings.SplitN(env, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := kv[0]
+		if strings.HasPrefix(key, providerPrefix) || key == auditKey {
+			os.Unsetenv(key)
+		}
 	}
-	os.Unsetenv("AOEO_AUDIT_ENABLED")
 }
 
 // RetryConfigFromEnv 从环境变量加载重试配置。
@@ -190,6 +212,7 @@ func parseDurationEnv(key string, defaultVal time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		GetLogger().Warn("环境变量解析失败，使用默认值", "key", key, "value", v, "default", defaultVal, "error", err)
 		return defaultVal
 	}
 	return d

@@ -56,6 +56,12 @@ func NewMySQL(dsn string) (core.Storage, error) {
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
 
+	// 显式设置连接字符集为 utf8mb4，确保 emoji 等特殊字符不会被截断或乱码。
+	if _, err := db.Exec("SET NAMES utf8mb4"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set charset utf8mb4: %w", err)
+	}
+
 	// MySQL 使用 "?" 作为占位符。
 	s := &sqlStorage{
 		db:          db,

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 )
 
 // FakeGenerator 为各实体类型生成逼真的伪造数据。
@@ -216,7 +217,7 @@ func (g *FakeGenerator) fakeDate() string {
 
 // genericMask 使用星号遮蔽原始值，保持长度不变。
 func (g *FakeGenerator) genericMask(original string) string {
-	return strings.Repeat("*", len(original))
+	return strings.Repeat("*", utf8.RuneCountInString(original))
 }
 
 // randomSuffix 生成指定长度的随机小写字母和数字组合，用于构造唯一标识。

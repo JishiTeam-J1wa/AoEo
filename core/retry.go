@@ -8,6 +8,8 @@
 package core
 
 import (
+	"errors"
+	"net"
 	"time"
 )
 
@@ -92,9 +94,15 @@ func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
-	for _, pattern := range transientPatterns {
-		if containsIgnoreCase(errStr, pattern) {
+	// 优先使用结构化错误类型判断
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// 回退到字符串匹配
+	msg := err.Error()
+	for _, p := range transientPatterns {
+		if containsFold(msg, p) {
 			return true
 		}
 	}

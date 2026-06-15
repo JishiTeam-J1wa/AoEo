@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -21,10 +23,19 @@ import (
 	"github.com/JishiTeam-J1wa/AoEo/privacy"
 )
 
+// signalCtx 是全局的信号上下文，由 main() 初始化。
+// 当收到 SIGINT 或 SIGTERM 信号时自动取消，各子命令用它替代 context.Background()。
+var signalCtx context.Context
+
 // main 是 AoEo CLI 的入口函数。
 // 解析第一个命令行参数作为子命令，分发到对应的处理函数。
 // 支持的子命令：list-models、test、status、chat、stream、help。
 func main() {
+	// 注册信号处理：收到 SIGINT（Ctrl+C）或 SIGTERM 时自动取消 signalCtx。
+	var stop context.CancelFunc
+	signalCtx, stop = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
@@ -42,6 +53,8 @@ func main() {
 		cmdChat(os.Args[2:])
 	case "stream":
 		cmdStream(os.Args[2:])
+	case "privacy":
+		cmdPrivacy(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -98,7 +111,7 @@ func cmdListModels(args []string) {
 	}
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(signalCtx, 30*time.Second)
 	defer cancel()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -133,7 +146,7 @@ func cmdTest(args []string) {
 	}
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(signalCtx, 30*time.Second)
 	defer cancel()
 
 	statuses := client.ProviderStatus()
@@ -213,7 +226,7 @@ func cmdChat(args []string) {
 	}
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(signalCtx, 120*time.Second)
 	defer cancel()
 
 	req := aoeo.BuildRequest(
@@ -221,7 +234,7 @@ func cmdChat(args []string) {
 		aoeo.WithTemperature(float32(*temp)),
 	)
 	if *model != "" {
-		req = aoeo.BuildRequest(req.Messages, aoeo.WithModel(*model))
+		req = aoeo.BuildRequest(req.Messages, aoeo.WithTemperature(float32(*temp)), aoeo.WithModel(*model))
 	}
 
 	var resp *core.ChatCompletionResponse
@@ -259,7 +272,7 @@ func cmdStream(args []string) {
 	}
 	defer client.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(signalCtx, 120*time.Second)
 	defer cancel()
 
 	req := aoeo.BuildRequest(
@@ -267,7 +280,7 @@ func cmdStream(args []string) {
 		aoeo.WithTemperature(float32(*temp)),
 	)
 	if *model != "" {
-		req = aoeo.BuildRequest(req.Messages, aoeo.WithModel(*model))
+		req = aoeo.BuildRequest(req.Messages, aoeo.WithTemperature(float32(*temp)), aoeo.WithModel(*model))
 	}
 
 	var stream <-chan core.StreamCompletionResponse
@@ -323,7 +336,7 @@ func cmdPrivacy(args []string) {
 	}
 	defer gw.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(signalCtx, 5*time.Second)
 	defer cancel()
 
 	if gw.HealthCheck(ctx) {

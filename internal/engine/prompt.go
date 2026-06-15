@@ -99,9 +99,11 @@ func (pi *PromptInjector) Templates() []PromptTemplate {
 //   - req: *core.ChatCompletionRequest - 待注入的请求（会被直接修改）
 func (pi *PromptInjector) Inject(providerName, model string, req *core.ChatCompletionRequest) {
 	pi.mu.RLock()
-	templates := pi.templates
+	templates := make([]PromptTemplate, len(pi.templates))
+	copy(templates, pi.templates)
 	pi.mu.RUnlock()
 
+	// 在锁外使用副本进行匹配和注入
 	for _, tmpl := range templates {
 		if !matchWildcard(tmpl.Provider, providerName) || !matchWildcard(tmpl.Model, model) {
 			continue
@@ -141,7 +143,7 @@ func replaceVars(template string, vars map[string]string) string {
 func injectSystem(req *core.ChatCompletionRequest, content string) {
 	for i := range req.Messages {
 		if req.Messages[i].Role == "system" {
-			req.Messages[i].Content = content
+			req.Messages[i].Content = content + "\n\n" + req.Messages[i].Content
 			return
 		}
 	}

@@ -80,6 +80,9 @@ type BaseProvider struct {
 	healthHead   int
 	healthCount  int
 	healthLatest atomic.Pointer[core.ProviderHealth]
+
+	// 健康检查复用的 HTTP 客户端，在构造时初始化，避免每次 HealthCheck 创建新客户端
+	healthClient *http.Client
 }
 
 // emitterBox 封装 EventEmitter，使 atomic.Value 存储类型一致的指针。
@@ -98,6 +101,11 @@ func NewBaseProvider(config core.ProviderConfig) *BaseProvider {
 	bp := &BaseProvider{config: config}
 	bp.emitter.Store(&emitterBox{em: core.NopEmitter{}})
 	bp.healthLatest.Store(&core.ProviderHealth{})
+	if config.HTTPClient != nil {
+		bp.healthClient = config.HTTPClient
+	} else {
+		bp.healthClient = &http.Client{Timeout: 5 * time.Second}
+	}
 	return bp
 }
 
@@ -273,10 +281,7 @@ func (b *BaseProvider) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("provider %s config incomplete", b.config.Name)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	if b.config.HTTPClient != nil {
-		client = b.config.HTTPClient
-	}
+	client := b.healthClient
 
 	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -379,6 +384,7 @@ func (b *BaseProvider) ChatCompleteStream(ctx context.Context, req core.ChatComp
 type OpenAIProvider struct {
 	*BaseProvider                   // 嵌入 BaseProvider，继承熔断器、健康指标等通用功能
 	Client       *openai.Client     // OpenAI 兼容协议的客户端实例
+	streamWg     sync.WaitGroup     // 跟踪所有流式 goroutine，确保 Close 时全部退出
 }
 
 // NewOpenAIProvider 创建一个通用的 OpenAI 兼容协议 Provider。
@@ -661,23 +667,21 @@ func (p *OpenAIProvider) ChatCompleteStream(ctx context.Context, req core.ChatCo
 	}
 
 	ch := make(chan core.StreamCompletionResponse, 16)
-	var wg sync.WaitGroup
-	wg.Add(1)
+	p.streamWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer p.streamWg.Done()
 		defer close(ch)
 		defer stream.Close()
 
 		for {
-			select {
-			case <-ctx.Done():
+			// 在每次 Recv 之前检查 context 是否已取消，避免 busy-wait
+			if ctx.Err() != nil {
 				ch <- core.StreamCompletionResponse{
 					Model: cfg.Model,
 					Chunk: core.StreamChunk{FinishReason: "cancelled"},
 					Err:   ctx.Err(),
 				}
 				return
-			default:
 			}
 
 			response, err := stream.Recv()
@@ -876,6 +880,15 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]core.ModelInfo, erro
 		result = append(result, core.ModelInfo{ID: m.ID, OwnedBy: m.OwnedBy})
 	}
 	return result, nil
+}
+
+// Close 释放 OpenAIProvider 持有的资源，等待所有流式 goroutine 完成。
+//
+// Return:
+//   - error: 释放资源失败时返回错误
+func (p *OpenAIProvider) Close() error {
+	p.streamWg.Wait()
+	return nil
 }
 
 // NewDeepSeekProvider 创建 DeepSeek（深度求索）Provider，并设置合理的默认配置。

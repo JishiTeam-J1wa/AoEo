@@ -137,7 +137,14 @@ func ExtractField(content, fieldName string) string {
 		re = regexp.MustCompile(`(?i)"` + regexp.QuoteMeta(fieldName) + `"\s*:\s*"(.*?)(?:"|,|\s*})`)
 		fieldRegexCacheMu.Lock()
 		if len(fieldRegexCache) >= fieldRegexCacheMax {
-			fieldRegexCache = make(map[string]*regexp.Regexp)
+			count := 0
+			for k := range fieldRegexCache {
+				delete(fieldRegexCache, k)
+				count++
+				if count >= fieldRegexCacheMax/2 {
+					break
+				}
+			}
 		}
 		fieldRegexCache[fieldName] = re
 		fieldRegexCacheMu.Unlock()

@@ -148,10 +148,13 @@ func (p *Pseudonymizer) PseudonymizeRequest(ctx context.Context, sessionID strin
 	}
 
 	// 第四步：对所有消息内容逐一执行替换操作
+	// 按 spans 已排序的顺序（长度降序）替换，确保长值优先于短值，防止子串干扰
 	cloned := req.Clone()
 	for i := range cloned.Messages {
-		for orig, fake := range replacements {
-			cloned.Messages[i].Content = strings.ReplaceAll(cloned.Messages[i].Content, orig, fake)
+		for _, span := range spans {
+			if fake, ok := replacements[span.Original]; ok {
+				cloned.Messages[i].Content = strings.ReplaceAll(cloned.Messages[i].Content, span.Original, fake)
+			}
 		}
 	}
 

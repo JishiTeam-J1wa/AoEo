@@ -49,16 +49,12 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		return nil, ErrNoAvailableProvider
 	}
 
-	reqCopy := req
+	reqCopy := req.Clone()
 	if reqCopy.Model == "" {
 		reqCopy.Model = p.Config().Model
 	}
 
 	if pi := s.promptInjector.Load(); pi != nil {
-		reqCopy = req.Clone()
-		if reqCopy.Model == "" {
-			reqCopy.Model = p.Config().Model
-		}
 		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
 	}
 
@@ -127,6 +123,98 @@ func (s *Scheduler) ChatCompleteStream(ctx context.Context, req core.ChatComplet
 		}
 	}()
 	return wrapped, nil
+}
+
+// chatCompleteStreamWithRouter 使用指定路由器执行流式补全，不修改全局路由状态。
+func (s *Scheduler) chatCompleteStreamWithRouter(ctx context.Context, r core.Router, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+	if err := s.sem.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	p, err := s.pickWithSpecificRouter(ctx, r, req)
+	if err != nil {
+		s.sem.Release()
+		return nil, err
+	}
+
+	reqCopy := req.Clone()
+	if reqCopy.Model == "" {
+		reqCopy.Model = p.Config().Model
+	}
+
+	if pi := s.promptInjector.Load(); pi != nil {
+		pi.Inject(p.Name(), reqCopy.Model, &reqCopy)
+	}
+
+	chain := s.interceptorChain()
+	if err := chain.ApplyBefore(ctx, &reqCopy); err != nil {
+		s.sem.Release()
+		return nil, err
+	}
+
+	streamCtx, cancel := context.WithTimeout(ctx, time.Duration(s.timeout.Load()))
+	stream, err := p.ChatCompleteStream(streamCtx, reqCopy)
+	if err != nil {
+		cancel()
+		s.sem.Release()
+		return nil, err
+	}
+
+	const wrappedBufSize = 16
+	wrapped := make(chan core.StreamCompletionResponse, wrappedBufSize)
+	go func() {
+		defer close(wrapped)
+		defer s.sem.Release()
+		defer cancel()
+		var finalErr error
+		defer func() {
+			if err := chain.ApplyAfterStreamDone(streamCtx, reqCopy, finalErr); err != nil {
+				core.GetLogger().Debug("AfterStreamDone error", "error", err)
+			}
+		}()
+		for {
+			select {
+			case <-streamCtx.Done():
+				finalErr = streamCtx.Err()
+				return
+			case msg, ok := <-stream:
+				if !ok {
+					return
+				}
+				if msg.Err != nil {
+					finalErr = msg.Err
+					select {
+					case <-streamCtx.Done():
+						return
+					case wrapped <- msg:
+					}
+					return
+				}
+				if err := chain.ApplyAfterStreamChunk(streamCtx, reqCopy, &msg.Chunk); err != nil {
+					finalErr = err
+					select {
+					case <-streamCtx.Done():
+						return
+					case wrapped <- core.StreamCompletionResponse{Err: err}:
+					}
+					return
+				}
+				select {
+				case <-streamCtx.Done():
+					return
+				case wrapped <- msg:
+				}
+			}
+		}
+	}()
+	return wrapped, nil
+}
+
+// ChatCompleteStreamWithRouter 使用指定路由器执行流式补全，线程安全。
+func (s *Scheduler) ChatCompleteStreamWithRouter(ctx context.Context, r core.Router, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
+	return s.chatCompleteStreamWithRouter(ctx, r, req)
 }
 
 // ParseSSE 解析原始 SSE（Server-Sent Events）数据流，将其转换为 StreamChunk 通道。

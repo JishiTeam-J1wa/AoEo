@@ -154,12 +154,24 @@ func (s *sqlStorage) createSchema(autoIncrement string) error {
 // Return:
 //   - error: 插入失败时返回错误
 func (s *sqlStorage) RecordCall(ctx context.Context, r core.CallRecord) error {
-	reqJSON, _ := json.Marshal(r.Request)
-	respJSON, _ := json.Marshal(r.Response)
-	tagsJSON, _ := json.Marshal(r.Tags)
+	reqJSON, err := json.Marshal(r.Request)
+	if err != nil {
+		core.GetLogger().Warn("序列化请求失败", "error", err)
+		reqJSON = []byte("null")
+	}
+	respJSON, err := json.Marshal(r.Response)
+	if err != nil {
+		core.GetLogger().Warn("序列化响应失败", "error", err)
+		respJSON = []byte("null")
+	}
+	tagsJSON, err := json.Marshal(r.Tags)
+	if err != nil {
+		core.GetLogger().Warn("序列化标签失败", "error", err)
+		tagsJSON = []byte("null")
+	}
 
 	// r.Timestamp.Unix() 将时间转换为 Unix 时间戳存储，避免时区问题。
-	_, err := s.db.ExecContext(ctx,
+	_, err = s.db.ExecContext(ctx,
 		"INSERT INTO calls (id, provider, model, request_json, response_json, error, latency_ms, timestamp, tags_json, fallback_from, cost, currency) VALUES ("+
 			s.placeholders(12)+
 			")",
@@ -226,7 +238,23 @@ func (s *sqlStorage) GetCallsByTag(ctx context.Context, tag string, limit int) (
 		return nil, err
 	}
 	defer rows.Close()
-	return s.scanCalls(rows, limit)
+	result, err := s.scanCalls(rows, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Go 层二次过滤：LIKE 子串匹配可能误中（如 tag "log" 匹配 "logging"），
+	// 这里精确比对反序列化后的 Tags 切片，只保留真正包含目标 tag 的记录。
+	var filtered []core.CallRecord
+	for _, r := range result {
+		for _, t := range r.Tags {
+			if t == tag {
+				filtered = append(filtered, r)
+				break
+			}
+		}
+	}
+	return filtered, nil
 }
 
 // GetCallsByProvider 根据服务提供商名称获取调用记录列表。
@@ -340,11 +368,17 @@ func (s *sqlStorage) scanCalls(rows *sql.Rows, limit int) ([]core.CallRecord, er
 		}
 		// 将 Unix 时间戳转换为 time.Time 对象。
 		r.Timestamp = time.Unix(tsUnix, 0)
-		// 这里忽略 Unmarshal 错误（使用 _），
-		// 因为 JSON 格式不正确时字段会保持零值，不影响其他字段的使用。
-		json.Unmarshal([]byte(reqJSON), &r.Request)
-		json.Unmarshal([]byte(respJSON), &r.Response)
-		json.Unmarshal([]byte(tagsJSON), &r.Tags)
+		// 反序列化 JSON 字段，失败时记录警告日志但不中断扫描，
+		// 字段会保持零值，不影响其他字段的使用。
+		if err := json.Unmarshal([]byte(reqJSON), &r.Request); err != nil {
+			core.GetLogger().Warn("反序列化请求失败", "error", err)
+		}
+		if err := json.Unmarshal([]byte(respJSON), &r.Response); err != nil {
+			core.GetLogger().Warn("反序列化响应失败", "error", err)
+		}
+		if err := json.Unmarshal([]byte(tagsJSON), &r.Tags); err != nil {
+			core.GetLogger().Warn("反序列化标签失败", "error", err)
+		}
 		result = append(result, r)
 	}
 	// rows.Err() 检查迭代过程中是否有隐藏的错误。

@@ -189,6 +189,9 @@ func (a *adaptiveSemaphore) ReleaseN(n int) {
 // Param:
 //   - n: int - 新的最大并发容量
 func (a *adaptiveSemaphore) setMaxConc(n int) {
+	if n < 1 {
+		n = 1
+	}
 	a.maxConc.Store(int32(n))
 
 	// 容量变更后，尝试唤醒等待队列中可以被满足的协程（逻辑同 ReleaseN）

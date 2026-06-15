@@ -7,7 +7,10 @@
 //   2026-06-12 - 注释体系规范化
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Pricing 保存 Provider 的每千 Token 定价信息。
 type Pricing struct {
@@ -27,9 +30,10 @@ func (u Usage) Cost(p Pricing) float64 {
 	if p.PromptPer1K == 0 && p.CompletionPer1K == 0 {
 		return 0
 	}
-	promptCost := float64(u.PromptTokens) / 1000.0 * p.PromptPer1K
-	completionCost := float64(u.CompletionTokens) / 1000.0 * p.CompletionPer1K
-	return promptCost + completionCost
+	// 转换为微单位（price * 1e6），使用整数运算避免浮点漂移
+	promptCostMicro := int64(u.PromptTokens) * int64(math.Round(p.PromptPer1K*1e6)) / 1000
+	completionCostMicro := int64(u.CompletionTokens) * int64(math.Round(p.CompletionPer1K*1e6)) / 1000
+	return float64(promptCostMicro+completionCostMicro) / 1e6
 }
 
 // CostString 返回人类可读的费用字符串（如 "0.003500 CNY"）。

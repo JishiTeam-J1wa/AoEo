@@ -42,6 +42,10 @@ type History struct {
 	count   int          // buf 中有效元素的数量
 	maxSize int
 	storage core.Storage // 可选的持久化后端
+
+	persistCh chan CallRecord
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 // NewHistory 创建一个最多保留 maxSize 条记录的 History。
@@ -55,9 +59,22 @@ func NewHistory(maxSize int) *History {
 	if maxSize <= 0 {
 		maxSize = 100
 	}
-	return &History{
-		buf:     make([]CallRecord, maxSize),
-		maxSize: maxSize,
+	h := &History{
+		buf:       make([]CallRecord, maxSize),
+		maxSize:   maxSize,
+		persistCh: make(chan CallRecord, 256),
+		done:      make(chan struct{}),
+	}
+	for i := 0; i < 4; i++ {
+		go h.persistWorker()
+	}
+	return h
+}
+
+// persistWorker 从持久化通道中读取记录并写入后端。
+func (h *History) persistWorker() {
+	for r := range h.persistCh {
+		h.persistRecord(r)
 	}
 }
 
@@ -87,8 +104,12 @@ func (h *History) Record(r CallRecord) {
 	}
 
 	if h.storage != nil {
-		// 异步持久化，避免阻塞调用方
-		go h.persistRecord(r)
+		select {
+		case h.persistCh <- r:
+			// 成功发送到持久化队列
+		default:
+			// 队列已满，丢弃此条记录（避免阻塞主路径）
+		}
 	}
 }
 
@@ -114,6 +135,13 @@ func (h *History) persistRecord(r CallRecord) {
 	if err := h.storage.RecordCall(ctx, cr); err != nil {
 		core.GetLogger().Error("history persist failed", "error", err)
 	}
+}
+
+// Close 关闭持久化通道，等待 worker 处理完剩余记录后退出。
+func (h *History) Close() {
+	h.closeOnce.Do(func() {
+		close(h.persistCh)
+	})
 }
 
 // at 返回逻辑索引 i 处的元素，其中 0 表示最新的记录。

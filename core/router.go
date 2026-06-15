@@ -291,14 +291,17 @@ func (r *WeightedRouter) Select(ctx context.Context, candidates []ProviderStatus
 	for i, c := range candidates {
 		if c.Available {
 			s := r.score(c)
-			if s > 0 {
-				scoredList = append(scoredList, scored{idx: i, score: s, weight: s})
-				totalWeight += s
-			}
+			scoredList = append(scoredList, scored{idx: i, score: s, weight: s})
+			totalWeight += s
 		}
 	}
 	if len(scoredList) == 0 {
 		return -1, errors.New("no available provider")
+	}
+	// 如果所有分数 <= 0，回退到 Round-Robin 均等选择
+	if totalWeight <= 0 {
+		fallback := &RoundRobinRouter{}
+		return fallback.Select(ctx, candidates, req)
 	}
 	if len(scoredList) == 1 {
 		return scoredList[0].idx, nil

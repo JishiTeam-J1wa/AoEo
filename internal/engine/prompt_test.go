@@ -58,8 +58,8 @@ func TestInjectSystem(t *testing.T) {
 		},
 	}
 	injectSystem(&req2, "new")
-	if len(req2.Messages) != 2 || req2.Messages[0].Content != "new" {
-		t.Fatal("expected system message replaced")
+	if len(req2.Messages) != 2 || req2.Messages[0].Content != "new\n\nold" {
+		t.Fatal("expected system message prepended")
 	}
 }
 

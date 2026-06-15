@@ -83,6 +83,8 @@ var (
 	RetryConfigFromEnv      = core.RetryConfigFromEnv
 	SetEnvConfig            = core.SetEnvConfig
 	UnsetEnvConfig          = core.UnsetEnvConfig
+	SetEnvConfigWithPrefix      = core.SetEnvConfigWithPrefix
+	UnsetEnvConfigWithPrefix    = core.UnsetEnvConfigWithPrefix
 )
 
 // WithXxx 系列选项函数，从 engine 包重新导出。
@@ -185,12 +187,12 @@ func (c *Client) Stats() map[string]engine.ProviderStats {
 //   - emitter: core.EventEmitter - 事件发射器实例，传 nil 则回退为 NopEmitter
 func (c *Client) SetEmitter(emitter core.EventEmitter) {
 	c.emitterMu.Lock()
-	defer c.emitterMu.Unlock()
 	if emitter == nil {
 		c.emitter = core.NopEmitter{}
 	} else {
 		c.emitter = emitter
 	}
+	c.emitterMu.Unlock()
 	// 将事件发射器传播到所有已注册的 Provider。
 	for _, p := range c.scheduler.AvailableProviders() {
 		p.SetEmitter(emitter)
@@ -280,10 +282,7 @@ func (c *Client) ChatCompleteStream(ctx context.Context, req core.ChatCompletion
 //   - *core.ChatCompletionResponse: 补全响应
 //   - error: 指定 Provider 不可用或请求失败时返回
 func (c *Client) ChatCompleteWithProvider(ctx context.Context, providerName string, req core.ChatCompletionRequest) (*core.ChatCompletionResponse, error) {
-	old := c.Router()
-	c.SetRouter(&core.SingleProviderRouter{Name: providerName})
-	defer c.SetRouter(old)
-	return c.ChatComplete(ctx, req)
+	return c.scheduler.ChatCompleteWithRouter(ctx, &core.SingleProviderRouter{Name: providerName}, req)
 }
 
 // ChatCompleteStreamWithProvider 向指定名称的 Provider 发送流式请求。
@@ -299,10 +298,7 @@ func (c *Client) ChatCompleteWithProvider(ctx context.Context, providerName stri
 //   - <-chan core.StreamCompletionResponse: 流式数据块 channel
 //   - error: 建立流连接失败时返回
 func (c *Client) ChatCompleteStreamWithProvider(ctx context.Context, providerName string, req core.ChatCompletionRequest) (<-chan core.StreamCompletionResponse, error) {
-	old := c.Router()
-	c.SetRouter(&core.SingleProviderRouter{Name: providerName})
-	defer c.SetRouter(old)
-	return c.ChatCompleteStream(ctx, req)
+	return c.scheduler.ChatCompleteStreamWithRouter(ctx, &core.SingleProviderRouter{Name: providerName}, req)
 }
 
 // ListModels 返回指定 Provider 支持的模型列表。
