@@ -602,10 +602,12 @@ AoEo/
 │       └── requirements.txt
 │
 ├── docs/
-│   └── diagrams/          # Engineering blueprint diagrams
-│       ├── aoeo_architecture.html       # 6-layer system architecture
-│       ├── aoeo_privacy_module.html     # Privacy module detailed blueprint
-│       └── aoeo_request_lifecycle.html  # Request scheduling & data flow
+│   ├── diagrams/          # Engineering blueprint diagrams
+│   │   ├── aoeo_architecture.html       # 6-layer system architecture
+│   │   ├── aoeo_privacy_module.html     # Privacy module detailed blueprint
+│   │   └── aoeo_request_lifecycle.html  # Request scheduling & data flow
+│   ├── DEEP_AUDIT_REPORT.md             # 7-dimension deep audit report
+│   └── COMMENT_AUDIT_REPORT.md          # Comment normalization audit
 │
 ├── examples/              # Usage examples
 │   ├── basic/
@@ -636,6 +638,77 @@ AoEo/
 5. **日志级别**：生产环境建议 `slog.LevelWarn`
 6. **请求预验证**：发送前调用 `req.Validate()` 提前拦截参数错误
 7. **Nil 安全访问**：优先使用 `resp.Content()` 代替 `resp.Choices[0].Message.Content`
+
+---
+
+## Changelog
+
+### v1.3.0 — 深度审计 & 注释规范化 (2026-06-15)
+
+**深度代码审计**: 对全部 39 个源文件（~7,700 行）执行 7 维度功能审计（架构合理性、并发安全、错误处理、边界条件、安全漏洞、性能隐患、可扩展性），发现并修复 **11 个 HIGH + 18 个 MEDIUM** 级问题。
+
+<details>
+<summary>HIGH 级修复 (11项)</summary>
+
+| 模块 | 问题 | 修复方案 |
+|------|------|----------|
+| `client.go` | `ChatCompleteWithProvider` 并发修改共享路由器导致数据竞争 | 改为请求级路由注入（`ChatCompleteWithRouter`），不再修改全局状态 |
+| `stream.go` | 缺少 `req.Clone()`，拦截器修改污染调用方原始请求 | 始终使用 `req.Clone()` 深拷贝 |
+| `scheduler.go` | `ChatCompleteWithFallback` 未克隆请求即传入拦截器 | `ApplyBefore` 前添加 `req.Clone()` |
+| `scheduler.go` | `ChatCompleteDual` 两处 `append(req.Tags)` 共享底层数组竞争 | 显式 `make + copy` 克隆 Tags 切片 |
+| `history.go` | `Record()` 每次创建新 goroutine，高吞吐下 OOM | 改为 4-worker 有界池 + 256 缓冲 channel |
+| `prompt.go` | `Inject()` 释放 RLock 后遍历共享底层数组，与 `Clear()` 竞争 | RLock 内完成模板深拷贝 |
+| `providers.go` | `ChatCompleteStream` 外层 select+default 形成 busy-wait | 改为 `ctx.Err()` 检查 + 自然阻塞 |
+| `providers.go` | WaitGroup 创建但从未 Wait()，Provider 关闭时流式 goroutine 泄漏 | `OpenAIProvider` 新增 `streamWg`，`Close()` 中 `Wait()` |
+| `pseudonymizer.go` | map 迭代不确定性导致替换顺序随机 | 改为按 spans 排序顺序遍历 |
+| `generator.go` | `genericMask` 使用 `len()` 计算字节数而非字符数 | 改用 `utf8.RuneCountInString()` |
+| `cmd/main.go` | 指定 `-model` 时重建请求丢失 `-temperature` | 重建时同时传入所有选项 |
+
+</details>
+
+<details>
+<summary>MEDIUM 级修复 (18项)</summary>
+
+| 模块 | 问题 | 修复方案 |
+|------|------|----------|
+| `client.go` | `SetEmitter` 持锁期间遍历 Provider，锁持有时间过长 | 先赋值再释放锁，锁外传播到 Provider |
+| `core/env.go` | `SetEnvConfig` 硬编码前缀、不清理残留、静默吞错 | 支持自定义前缀 + 清理残留 + 记录警告日志 |
+| `core/retry.go` | `IsRetryableError` 纯字符串匹配可能误判 | 优先用 `net.Error` 结构化判断 |
+| `core/router.go` | `WeightedRouter` Select 过滤零分而 SelectSequence 不过滤 | 零分时回退到 RoundRobin |
+| `core/interceptor.go` | 拦截器链无 panic 恢复 | 四个 Apply 方法添加 `recover()` |
+| `core/pricing.go` | `float64` 货币计算 IEEE 754 精度漂移 | 改用整数运算（微单位） |
+| `semaphore.go` | `setMaxConc` 无下限校验，n≤0 导致永久阻塞 | 添加 `n >= 1` 下限 |
+| `result.go` | 正则缓存满时全量清空，造成延迟尖峰 | 随机淘汰一半 |
+| `prompt.go` | `injectSystem` 替换而非追加 system 消息 | 改为 prepend + `\n\n` 分隔 |
+| `providers.go` | `HealthCheck` 每次创建新 `http.Client` | 复用 Provider 级共享客户端 |
+| `storage/base.go` | JSON Marshal/Unmarshal 错误被静默丢弃 | 记录警告日志 |
+| `storage/base.go` | `GetCallsByTag` LIKE 匹配精确度不足 | 添加 Go 层精确二次过滤 |
+| `storage/mysql.go` | 未设置 utf8mb4 字符集 | 初始化时执行 `SET NAMES utf8mb4` |
+| `cmd/main.go` | 死代码 `cmdPrivacy` 未注册 | 在 switch 中添加 `"privacy"` case |
+| `cmd/main.go` | 缺少 SIGINT/SIGTERM 信号处理 | 添加 `signal.NotifyContext` |
+| `engine/stream.go` | `ChatCompleteStreamWithRouter` 新增 | 支持请求级路由注入的流式方法 |
+| `engine/scheduler.go` | `ChatCompleteWithRouter` 新增 | 线程安全的指定路由补全方法 |
+| `privacy/gateway.go` | `Stats()` 返回 atomic 值拷贝 | 改为返回 `*Stats` 指针 |
+
+</details>
+
+### v1.2.0 — 注释体系规范化 (2026-06-12)
+
+对全部 39 个 Go 源文件执行注释体系规范化（+2,184 / -617 行）：
+
+- 为 37 个文件补充标准文件头（功能描述 / Author / Changelog）
+- 约 180 个导出函数补充 GoDoc 格式 Param / Return / Edge Cases 段
+- 删除约 40 处仅复述代码行为的冗余注释
+- 替换约 12 处 "implements X" 桩注释为有信息量的描述
+- 全部注释语言统一为中文（保留 CAS / EWMA / FIFO 等技术术语）
+
+### v1.1.0 — Bug 修复 + 中文注释 (2026-06-12)
+
+深度审计全部代码，发现并修复 **16 个 HIGH + 5 个 MEDIUM** 级 Bug，涵盖存储层资源泄漏、核心引擎竞态条件、隐私网关并发安全、Provider 适配层死代码等。修复后全部添加详细中文注释。
+
+### v1.0.0 — OPF 隐私引擎集成 (2026-06-11)
+
+集成 OpenAI Privacy Filter 模型替代 HuggingFace NER，重写 Sidecar 为轻量 httpx 代理，实现 3x OPF 集群部署，完成工程蓝图设计。
 
 ---
 
@@ -678,6 +751,13 @@ AoEo/
 - [x] 3x OPF cluster deployment (Docker Compose)
 - [x] Lightweight sidecar proxy (FastAPI + httpx, ~50MB)
 
+### Phase 5.5 — Deep Audit & Comment Normalization (Done)
+- [x] 7-dimension deep audit across all 39 source files (~7,700 lines)
+- [x] 11 HIGH + 18 MEDIUM concurrency safety & functional defects fixed
+- [x] Comment system normalization: GoDoc headers, Param/Return/Edge Cases for ~180 functions
+- [x] All comments unified to Chinese (technical terms preserved)
+- [x] `go build` + `go vet` + `go test -race` full verification
+
 ### Phase 6 — Future Directions
 - [ ] Weighted router: cost-based / custom scoring functions
 - [ ] Provider plugin mechanism: dynamic external provider loading
@@ -694,6 +774,8 @@ AoEo/
 | [DESIGN.md](./DESIGN.md) | 架构设计文档 |
 | [PRIVACY_GATEWAY.md](./PRIVACY_GATEWAY.md) | 隐私网关完整使用手册 |
 | [INTEGRATION.md](./INTEGRATION.md) | 集成指南 |
+| [DEEP_AUDIT_REPORT.md](./docs/DEEP_AUDIT_REPORT.md) | 功能实现深度审计报告（7 维度 · 39 文件） |
+| [COMMENT_AUDIT_REPORT.md](./docs/COMMENT_AUDIT_REPORT.md) | 注释体系规范化整改报告 |
 | [Architecture Blueprint](./docs/diagrams/aoeo_architecture.html) | 6 层系统全局架构图 |
 | [Privacy Blueprint](./docs/diagrams/aoeo_privacy_module.html) | Privacy 模块详细工程图 |
 | [Request Lifecycle](./docs/diagrams/aoeo_request_lifecycle.html) | 请求调度与数据流全链路图 |
