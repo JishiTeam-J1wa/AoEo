@@ -643,6 +643,68 @@ AoEo/
 
 ## Changelog
 
+### v1.4.0 — LOW 级问题全面修复 (2026-06-15)
+
+修复审计报告中剩余的 **35 个 LOW 级问题**，覆盖参数校验、分页查询、资源清理、边界处理和 CLI 改进五大类别。
+
+<details>
+<summary>参数校验 (6项)</summary>
+
+| 模块 | 修复内容 |
+|------|----------|
+| `options.go` | `WithSystemPrompt` 忽略空字符串输入 |
+| `options.go` | `WithTemperature` / `WithTopP` / `WithPresencePenalty` / `WithFrequencyPenalty` 添加范围 clamp |
+| `core/types.go` | `Clone()` 补充 `Stop` 切片深拷贝（此前遗漏） |
+| `core/types.go` | `Validate()` 检查 system 消息必须位于首位且不可重复 |
+| `core/config.go` | `Config.Validate()` 检测同名 Provider 并报告 |
+| `core/config.go` | `ValidateConfig` 校验 `MaxFailures >= 0` 和 `CooldownDuration >= 0` |
+
+</details>
+
+<details>
+<summary>功能增强 (8项)</summary>
+
+| 模块 | 修复内容 |
+|------|----------|
+| `core/storage.go` + `storage/base.go` | 新增 `GetCallsPaged` / `GetCallsByTagPaged` / `GetCallsByProviderPaged` 三个分页查询方法（`LIMIT + OFFSET`） |
+| `internal/engine/stream.go` | 新增 `ParseSSEWithContext(ctx, reader)` 支持 context 取消，原 `ParseSSE` 保持向后兼容 |
+| `internal/engine/result.go` | `ExtractJSON` 支持顶层 JSON 数组 `[...]` 提取 |
+| `internal/engine/result.go` | `ExtractField` 支持非字符串字段值（数字、布尔、null）提取 |
+| `core/event.go` | 添加 `EventTopic` 类型别名增强事件主题类型安全 |
+| `core/logger.go` | 新增 `NewDebugLogger()` 便捷构造函数（Debug 级别 JSON 输出） |
+| `storage/sqlite.go` | `:memory:` 检测改为精确匹配（`dsn == ":memory:"` / `mode=memory` / `file::memory:`）；文件型 SQLite 设置 `MaxOpenConns(1)` |
+| `storage/mysql.go` + `storage/postgres.go` | 添加 `ConnMaxIdleTime(5min)` 防止空闲连接被中间设备断开 |
+
+</details>
+
+<details>
+<summary>资源清理与性能优化 (6项)</summary>
+
+| 模块 | 修复内容 |
+|------|----------|
+| `internal/engine/semaphore.go` | CAS 快速路径每 4 次重试调用 `runtime.Gosched()` 避免 CPU 空转 |
+| `internal/engine/prompt.go` | `Clear()` 在截断切片前 nil out 元素，帮助 GC 回收大模板内容 |
+| `internal/engine/history.go` | `Records()` 合并两次独立 RLock 为单次持锁，消除竞态窗口 |
+| `internal/engine/audit.go` | 主 Provider 和审计 Provider 使用独立超时 context，互不影响 |
+| `internal/engine/retry_impl.go` | `DoRetry` 首次执行前检查 `ctx.Err()`，避免已取消 context 仍执行 |
+| `providers/providers.go` | `SkipTLSVerify` 启用时输出 `Warn` 级别安全警告日志 |
+
+</details>
+
+<details>
+<summary>CLI 与日志改进 (5项)</summary>
+
+| 模块 | 修复内容 |
+|------|----------|
+| `cmd/aoeo/main.go` | 全部 `log.Fatal` 替换为 `fmt.Fprintf(os.Stderr, ...) + os.Exit(1)`，行为更可控 |
+| `cmd/aoeo/main.go` | `cmdStream` 流式消费结束后输出 Token 用量统计（prompt + completion = total） |
+| `providers/providers.go` | `ChatComplete` 的 `recover()` 捕获完整堆栈信息（`debug.Stack()`） |
+| `providers/providers.go` | `buildOpenAIMessages` 始终设置 ToolCall `Index`（包括 0） |
+| `privacy/gateway.go` | `AfterStreamDone` 预留功能改为 `TODO(JishiTeam-J1wa, 2026-06)` 格式 |
+| `core/pricing.go` | `Cost()` 保护负数定价（clamp 为 0）；`CostString` 货币为空时不再默认 CNY |
+
+</details>
+
 ### v1.3.0 — 深度审计 & 注释规范化 (2026-06-15)
 
 **深度代码审计**: 对全部 39 个源文件（~7,700 行）执行 7 维度功能审计（架构合理性、并发安全、错误处理、边界条件、安全漏洞、性能隐患、可扩展性），发现并修复 **11 个 HIGH + 18 个 MEDIUM** 级问题。
