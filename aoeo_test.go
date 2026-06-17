@@ -1255,3 +1255,292 @@ func TestChatCompleteResponse_CreatedAt(t *testing.T) {
 		t.Fatalf("expected zero CreatedAt from mock, got %v", resp.CreatedAt)
 	}
 }
+
+// ============================================================================
+// Additional Option tests for coverage
+// ============================================================================
+
+func TestWithSystemPrompt_EmptyStringIgnored(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithSystemPrompt(""),
+	)
+	// Empty prompt should be ignored; no system message should be added
+	if len(req.Messages) != 1 {
+		t.Fatalf("expected 1 message (empty system prompt ignored), got %d", len(req.Messages))
+	}
+	if req.Messages[0].Role != "user" {
+		t.Fatal("expected only user message")
+	}
+}
+
+func TestWithSystemPrompt_OverwriteExisting(t *testing.T) {
+	req := BuildRequest(
+		[]Message{
+			{Role: "system", Content: "old system"},
+			{Role: "user", Content: "hi"},
+		},
+		WithSystemPrompt("new system"),
+	)
+	if len(req.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(req.Messages))
+	}
+	if req.Messages[0].Content != "new system" {
+		t.Fatalf("expected 'new system', got %s", req.Messages[0].Content)
+	}
+}
+
+func TestWithTemperature_ClampNegative(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTemperature(-1.0),
+	)
+	if req.Temperature != 0 {
+		t.Fatalf("expected Temperature clamped to 0, got %f", req.Temperature)
+	}
+}
+
+func TestWithTemperature_ClampAboveTwo(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTemperature(3.5),
+	)
+	if req.Temperature != 2 {
+		t.Fatalf("expected Temperature clamped to 2, got %f", req.Temperature)
+	}
+}
+
+func TestWithTemperature_NormalValue(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTemperature(0.8),
+	)
+	if req.Temperature != 0.8 {
+		t.Fatalf("expected Temperature 0.8, got %f", req.Temperature)
+	}
+}
+
+func TestWithTopP_ClampNegative(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTopP(-0.5),
+	)
+	if req.TopP != 0 {
+		t.Fatalf("expected TopP clamped to 0, got %f", req.TopP)
+	}
+}
+
+func TestWithTopP_ClampAboveOne(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTopP(1.5),
+	)
+	if req.TopP != 1 {
+		t.Fatalf("expected TopP clamped to 1, got %f", req.TopP)
+	}
+}
+
+func TestWithPresencePenalty_ClampNegative(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithPresencePenalty(-3.0),
+	)
+	if req.PresencePenalty != -2 {
+		t.Fatalf("expected PresencePenalty clamped to -2, got %f", req.PresencePenalty)
+	}
+}
+
+func TestWithPresencePenalty_ClampPositive(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithPresencePenalty(3.0),
+	)
+	if req.PresencePenalty != 2 {
+		t.Fatalf("expected PresencePenalty clamped to 2, got %f", req.PresencePenalty)
+	}
+}
+
+func TestWithFrequencyPenalty_ClampNegative(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithFrequencyPenalty(-3.0),
+	)
+	if req.FrequencyPenalty != -2 {
+		t.Fatalf("expected FrequencyPenalty clamped to -2, got %f", req.FrequencyPenalty)
+	}
+}
+
+func TestWithFrequencyPenalty_ClampPositive(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithFrequencyPenalty(3.0),
+	)
+	if req.FrequencyPenalty != 2 {
+		t.Fatalf("expected FrequencyPenalty clamped to 2, got %f", req.FrequencyPenalty)
+	}
+}
+
+func TestWithMaxTokens_NormalValue(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithMaxTokens(500),
+	)
+	if req.MaxTokens != 500 {
+		t.Fatalf("expected MaxTokens 500, got %d", req.MaxTokens)
+	}
+}
+
+func TestWithMaxTokens_NegativeValue(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithMaxTokens(-10),
+	)
+	if req.MaxTokens != -10 {
+		t.Fatalf("expected MaxTokens -10 (not clamped by option), got %d", req.MaxTokens)
+	}
+}
+
+func TestWithModel_SetsModel(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithModel("deepseek-v4-pro"),
+	)
+	if req.Model != "deepseek-v4-pro" {
+		t.Fatalf("expected model 'deepseek-v4-pro', got %s", req.Model)
+	}
+}
+
+func TestWithTools_DefensiveCopy(t *testing.T) {
+	tools := []core.Tool{
+		{Type: "function", Function: &core.FunctionDefinition{Name: "f1"}},
+	}
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTools(tools),
+	)
+	if len(req.Tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(req.Tools))
+	}
+	// Mutate original slice; request should be unaffected
+	tools[0].Type = "modified"
+	if req.Tools[0].Type != "function" {
+		t.Fatal("WithTools did not copy the slice defensively")
+	}
+}
+
+func TestWithTools_EmptySliceIgnored(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithTools([]core.Tool{}),
+	)
+	if req.Tools != nil {
+		t.Fatalf("expected nil Tools for empty slice, got %v", req.Tools)
+	}
+}
+
+func TestWithSeed_PointerSemantics(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithSeed(42),
+	)
+	if req.Seed == nil {
+		t.Fatal("expected non-nil Seed")
+	}
+	if *req.Seed != 42 {
+		t.Fatalf("expected Seed 42, got %d", *req.Seed)
+	}
+}
+
+func TestWithToolChoice_StringValue(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithToolChoice("auto"),
+	)
+	if req.ToolChoice != "auto" {
+		t.Fatalf("expected ToolChoice 'auto', got %v", req.ToolChoice)
+	}
+}
+
+func TestWithToolChoice_StructValue(t *testing.T) {
+	choice := core.ToolChoice{Type: "function"}
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithToolChoice(choice),
+	)
+	tc, ok := req.ToolChoice.(core.ToolChoice)
+	if !ok {
+		t.Fatalf("expected ToolChoice struct, got %T", req.ToolChoice)
+	}
+	if tc.Type != "function" {
+		t.Fatalf("expected type 'function', got %s", tc.Type)
+	}
+}
+
+func TestWithParallelToolCalls(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithParallelToolCalls(true),
+	)
+	if !req.ParallelToolCalls {
+		t.Fatal("expected ParallelToolCalls to be true")
+	}
+
+	req2 := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithParallelToolCalls(false),
+	)
+	if req2.ParallelToolCalls {
+		t.Fatal("expected ParallelToolCalls to be false")
+	}
+}
+
+func TestWithJSONResponse_SetsFormat(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithJSONResponse(),
+	)
+	if req.ResponseFormat.Type != "json_object" {
+		t.Fatalf("expected ResponseFormat.Type 'json_object', got %s", req.ResponseFormat.Type)
+	}
+}
+
+func TestBuildRequest_OptionApplicationOrder(t *testing.T) {
+	// Options should be applied in order; later options can override earlier ones
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithModel("model-a"),
+		WithModel("model-b"),
+	)
+	if req.Model != "model-b" {
+		t.Fatalf("expected model 'model-b' (last wins), got %s", req.Model)
+	}
+}
+
+func TestBuildRequest_DefensiveCopyIsolation(t *testing.T) {
+	original := []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "user", Content: "world"},
+	}
+	req := BuildRequest(original)
+
+	// Mutate original; request should be unaffected
+	original[0].Content = "modified"
+	original = append(original, Message{Role: "system", Content: "injected"})
+
+	if req.Messages[0].Content != "hello" {
+		t.Fatal("BuildRequest did not copy messages slice")
+	}
+	if len(req.Messages) != 2 {
+		t.Fatal("BuildRequest messages length changed after original append")
+	}
+}
+
+func TestWithStop_EmptySliceIgnored(t *testing.T) {
+	req := BuildRequest(
+		[]Message{{Role: "user", Content: "hi"}},
+		WithStop([]string{}),
+	)
+	if req.Stop != nil {
+		t.Fatalf("expected nil Stop for empty slice, got %v", req.Stop)
+	}
+}

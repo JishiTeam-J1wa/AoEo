@@ -75,6 +75,54 @@ func TestDefaultPricing(t *testing.T) {
 	}
 }
 
+func TestUsage_Cost_NegativePricing(t *testing.T) {
+	u := Usage{PromptTokens: 1000, CompletionTokens: 500}
+	// Negative pricing should be treated as 0.
+	p := Pricing{PromptPer1K: -1.0, CompletionPer1K: -2.0, Currency: "USD"}
+	cost := u.Cost(p)
+	if cost != 0 {
+		t.Fatalf("expected 0 cost for negative pricing, got %f", cost)
+	}
+}
+
+func TestUsage_Cost_OneSideZero(t *testing.T) {
+	u := Usage{PromptTokens: 2000, CompletionTokens: 1000}
+	// Only prompt pricing is set.
+	p := Pricing{PromptPer1K: 3.0, CompletionPer1K: 0, Currency: "USD"}
+	cost := u.Cost(p)
+	expected := 6.0 // 2K * 3.0 / 1K
+	if cost != expected {
+		t.Fatalf("expected %.2f, got %.6f", expected, cost)
+	}
+
+	// Only completion pricing is set.
+	p2 := Pricing{PromptPer1K: 0, CompletionPer1K: 4.0, Currency: "USD"}
+	cost2 := u.Cost(p2)
+	expected2 := 4.0 // 1K * 4.0 / 1K
+	if cost2 != expected2 {
+		t.Fatalf("expected %.2f, got %.6f", expected2, cost2)
+	}
+}
+
+func TestUsage_Cost_LargeTokens(t *testing.T) {
+	u := Usage{PromptTokens: 100000, CompletionTokens: 50000}
+	p := Pricing{PromptPer1K: 1.0, CompletionPer1K: 2.0, Currency: "USD"}
+	cost := u.Cost(p)
+	expected := 100.0 + 100.0 // 100K * 1.0 + 50K * 2.0
+	if cost != expected {
+		t.Fatalf("expected %.2f, got %.6f", expected, cost)
+	}
+}
+
+func TestUsage_CostString_WithCurrency(t *testing.T) {
+	u := Usage{PromptTokens: 1000, CompletionTokens: 500}
+	p := Pricing{PromptPer1K: 1.0, CompletionPer1K: 2.0, Currency: "CNY"}
+	s := u.CostString(p)
+	if !strings.Contains(s, "CNY") {
+		t.Fatalf("expected CNY in output, got %s", s)
+	}
+}
+
 func TestDefaultPricing_KnownModels(t *testing.T) {
 	p := DefaultPricing("deepseek", "deepseek-v4-pro")
 	if p.PromptPer1K != 2.0 || p.CompletionPer1K != 8.0 {

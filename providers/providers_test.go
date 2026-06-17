@@ -1,15 +1,19 @@
 package providers
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/JishiTeam-J1wa/AoEo/core"
+	"github.com/sashabaranov/go-openai"
 )
 
 // mockEmitter records emitted events.
@@ -703,5 +707,600 @@ func TestBuildOpenAIToolChoice(t *testing.T) {
 	// Nil
 	if v := buildOpenAIToolChoice(nil); v != nil {
 		t.Fatalf("expected nil, got %v", v)
+	}
+}
+
+// ========== New tests for coverage improvement ==========
+
+func TestBaseProvider_HealthCheck_Success(t *testing.T) {
+	srv := newMockHTTPServer(t, http.StatusOK, `{"status":"ok"}`)
+	defer srv.Close()
+
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name:       "test",
+		APIKey:     "test-key",
+		Endpoint:   srv.URL,
+		Model:      "m",
+		HTTPClient: srv.Client(),
+	})
+
+	err := bp.HealthCheck(context.Background())
+	if err != nil {
+		t.Fatalf("expected successful health check, got: %v", err)
+	}
+
+	h := bp.Health()
+	if h.LastLatencyMs < 0 {
+		t.Errorf("expected non-negative latency, got %d", h.LastLatencyMs)
+	}
+	if h.SuccessRate != 1.0 {
+		t.Errorf("expected success rate 1.0, got %f", h.SuccessRate)
+	}
+}
+
+func TestBaseProvider_HealthCheck_ServerError(t *testing.T) {
+	srv := newMockHTTPServer(t, http.StatusInternalServerError, "server error")
+	defer srv.Close()
+
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name:       "test",
+		APIKey:     "test-key",
+		Endpoint:   srv.URL,
+		Model:      "m",
+		HTTPClient: srv.Client(),
+	})
+
+	err := bp.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 500 status")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Fatalf("expected error to mention 500, got: %v", err)
+	}
+
+	h := bp.Health()
+	if h.SuccessRate != 0.0 {
+		t.Errorf("expected success rate 0.0, got %f", h.SuccessRate)
+	}
+}
+
+func TestBaseProvider_HealthCheck_ConfigIncomplete(t *testing.T) {
+	// Missing APIKey.
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", Endpoint: "https://t.com"})
+	err := bp.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatal("expected error for incomplete config")
+	}
+	if !strings.Contains(err.Error(), "config incomplete") {
+		t.Fatalf("expected 'config incomplete' error, got: %v", err)
+	}
+
+	// Missing Endpoint.
+	bp = NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k"})
+	err = bp.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing endpoint")
+	}
+}
+
+func TestBaseProvider_HealthCheck_ConnectionRefused(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name:     "test",
+		APIKey:   "test-key",
+		Endpoint: "http://127.0.0.1:1", // unlikely to be listening
+		Model:    "m",
+	})
+
+	err := bp.HealthCheck(context.Background())
+	if err == nil {
+		t.Fatal("expected error for connection refused")
+	}
+}
+
+func TestBaseProvider_HealthCheck_4xxIsSuccess(t *testing.T) {
+	// 4xx errors are not treated as health check failures (only >= 500 fails).
+	srv := newMockHTTPServer(t, http.StatusUnauthorized, `{"error":"unauthorized"}`)
+	defer srv.Close()
+
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name:       "test",
+		APIKey:     "test-key",
+		Endpoint:   srv.URL,
+		Model:      "m",
+		HTTPClient: srv.Client(),
+	})
+
+	err := bp.HealthCheck(context.Background())
+	if err != nil {
+		t.Fatalf("expected 401 to pass health check, got: %v", err)
+	}
+}
+
+func TestBaseProvider_IsAvailable_CircuitBreakerCooldown(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m",
+		MaxFailures: 2, CooldownDuration: 100 * time.Millisecond,
+	})
+
+	// Trigger circuit breaker.
+	bp.RecordFailure()
+	bp.RecordFailure()
+
+	if bp.IsAvailable() {
+		t.Fatal("expected unavailable after circuit breaker opens")
+	}
+
+	// Wait for cooldown to expire.
+	time.Sleep(150 * time.Millisecond)
+
+	if !bp.IsAvailable() {
+		t.Fatal("expected available after cooldown expires")
+	}
+}
+
+func TestBaseProvider_IsAvailable_CooldownNotExpired(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m",
+		MaxFailures: 2, CooldownDuration: 10 * time.Second,
+	})
+
+	bp.RecordFailure()
+	bp.RecordFailure()
+
+	if bp.IsAvailable() {
+		t.Fatal("expected unavailable during cooldown")
+	}
+}
+
+func TestBaseProvider_Health_InitialState(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{})
+	h := bp.Health()
+	if h.TotalChecks != 0 {
+		t.Errorf("expected 0 total checks initially, got %d", h.TotalChecks)
+	}
+	if h.SuccessRate != 0 {
+		t.Errorf("expected 0 success rate initially, got %f", h.SuccessRate)
+	}
+}
+
+func TestBaseProvider_RecordHealthCheck_AvgLatency(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	bp.RecordHealthCheck(100, true)
+	bp.RecordHealthCheck(200, true)
+	bp.RecordHealthCheck(300, true)
+
+	h := bp.Health()
+	if h.AvgLatencyMs != 200 {
+		t.Errorf("expected avg latency 200, got %d", h.AvgLatencyMs)
+	}
+	if h.TotalChecks != 3 {
+		t.Errorf("expected 3 total checks, got %d", h.TotalChecks)
+	}
+}
+
+func TestBaseProvider_RecordCallResult_Success(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	bp.RecordCallResult(50, nil)
+	h := bp.Health()
+	if h.SuccessRate != 1.0 {
+		t.Errorf("expected success rate 1.0, got %f", h.SuccessRate)
+	}
+	if h.ConsecutiveFails != 0 {
+		t.Errorf("expected 0 consecutive fails, got %d", h.ConsecutiveFails)
+	}
+}
+
+func TestBaseProvider_RecordCallResult_Failure(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+
+	bp.RecordCallResult(100, errors.New("timeout"))
+	h := bp.Health()
+	if h.SuccessRate != 0.0 {
+		t.Errorf("expected success rate 0.0, got %f", h.SuccessRate)
+	}
+	if h.ConsecutiveFails != 1 {
+		t.Errorf("expected 1 consecutive fail, got %d", h.ConsecutiveFails)
+	}
+}
+
+func TestBaseProvider_RecordSuccess_NoPriorFailure(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m"})
+	emit := &mockEmitter{}
+	bp.SetEmitter(emit)
+
+	// RecordSuccess when no prior failures should NOT emit recover event.
+	bp.RecordSuccess()
+	if emit.Count(core.EventProviderRecover) != 0 {
+		t.Fatalf("expected no recover event, got %d", emit.Count(core.EventProviderRecover))
+	}
+}
+
+func TestBaseProvider_RecordFailure_EmitsEvents(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m",
+		MaxFailures: 2,
+	})
+	emit := &mockEmitter{}
+	bp.SetEmitter(emit)
+
+	bp.RecordFailure() // count=1, below threshold
+	if emit.Count(core.EventProviderFail) != 1 {
+		t.Fatalf("expected 1 fail event, got %d", emit.Count(core.EventProviderFail))
+	}
+	if emit.Count(core.EventProviderOpen) != 0 {
+		t.Fatalf("expected 0 open events before threshold, got %d", emit.Count(core.EventProviderOpen))
+	}
+
+	bp.RecordFailure() // count=2, reaches threshold => circuit opens
+	if emit.Count(core.EventProviderFail) != 2 {
+		t.Fatalf("expected 2 fail events, got %d", emit.Count(core.EventProviderFail))
+	}
+	if emit.Count(core.EventProviderOpen) != 1 {
+		t.Fatalf("expected 1 open event after threshold, got %d", emit.Count(core.EventProviderOpen))
+	}
+}
+
+func TestBaseProvider_RecordFailure_DefaultMaxFailures(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name: "test", APIKey: "k", Endpoint: "https://t.com", Model: "m",
+		// MaxFailures=0 => defaults to 3
+	})
+
+	bp.RecordFailure()
+	bp.RecordFailure()
+	if !bp.IsAvailable() {
+		t.Fatal("should still be available after 2 failures (default max is 3)")
+	}
+
+	bp.RecordFailure()
+	if bp.IsAvailable() {
+		t.Fatal("should be unavailable after 3 failures")
+	}
+}
+
+func TestBaseProvider_SetEmitter_NilFallsBackToNop(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test"})
+	bp.SetEmitter(nil)
+
+	// Should not panic when emitting events.
+	em := bp.getEmitter()
+	if em == nil {
+		t.Fatal("expected non-nil emitter after SetEmitter(nil)")
+	}
+	em.Emit("test-topic", "data")
+}
+
+func TestBaseProvider_FailUntil_ZeroValue(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{})
+
+	if !bp.FailUntil().IsZero() {
+		t.Fatal("expected zero FailUntil initially")
+	}
+
+	// Set to zero explicitly.
+	bp.SetFailUntil(time.Time{})
+	if !bp.FailUntil().IsZero() {
+		t.Fatal("expected zero FailUntil after SetFailUntil(zero)")
+	}
+}
+
+func TestBaseProvider_FailUntil_SetAndClear(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{})
+
+	future := time.Now().Add(time.Hour)
+	bp.SetFailUntil(future)
+	if bp.FailUntil().IsZero() {
+		t.Fatal("expected non-zero FailUntil after setting")
+	}
+
+	// Clear it.
+	bp.SetFailUntil(time.Time{})
+	if !bp.FailUntil().IsZero() {
+		t.Fatal("expected zero FailUntil after clearing")
+	}
+}
+
+func TestBaseProvider_SystemPrompt_Lifecycle(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{})
+
+	// Initial state: empty.
+	if bp.GetSystemPrompt() != "" {
+		t.Fatal("expected empty system prompt initially")
+	}
+
+	// Set.
+	bp.SetSystemPrompt("You are a helpful assistant.")
+	if bp.GetSystemPrompt() != "You are a helpful assistant." {
+		t.Fatalf("unexpected system prompt: %s", bp.GetSystemPrompt())
+	}
+
+	// Override.
+	bp.SetSystemPrompt("New prompt.")
+	if bp.GetSystemPrompt() != "New prompt." {
+		t.Fatalf("expected overridden prompt, got: %s", bp.GetSystemPrompt())
+	}
+
+	// Clear.
+	bp.ClearSystemPrompt()
+	if bp.GetSystemPrompt() != "" {
+		t.Fatal("expected empty after clear")
+	}
+}
+
+func TestBaseProvider_Close_ReturnsNil(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{})
+	if err := bp.Close(); err != nil {
+		t.Fatalf("BaseProvider.Close should return nil, got: %v", err)
+	}
+}
+
+func TestOpenAIProvider_Close_NoStreams(t *testing.T) {
+	p := NewOpenAIProvider(core.ProviderConfig{
+		Name: "test", APIKey: "k", Endpoint: "https://api.example.com", Model: "m",
+	})
+	// Close without any active streams should return nil immediately.
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close should return nil: %v", err)
+	}
+}
+
+func TestBuildOpenAIMessages_AllRoles(t *testing.T) {
+	msgs := []core.Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "Hello", Name: "user1"},
+		{Role: "assistant", Content: "Hi there"},
+		{Role: "tool", ToolCallID: "tc_1", Content: "result"},
+	}
+
+	result := buildOpenAIMessages(msgs)
+	if len(result) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(result))
+	}
+	if result[0].Role != "system" || result[0].Content != "You are helpful." {
+		t.Fatalf("unexpected system message: %+v", result[0])
+	}
+	if result[1].Name != "user1" {
+		t.Fatalf("expected Name 'user1', got '%s'", result[1].Name)
+	}
+	if result[3].ToolCallID != "tc_1" {
+		t.Fatalf("expected ToolCallID 'tc_1', got '%s'", result[3].ToolCallID)
+	}
+}
+
+func TestBuildOpenAIMessages_ToolCallsWithIndex(t *testing.T) {
+	msgs := []core.Message{
+		{Role: "assistant", ToolCalls: []core.ToolCall{
+			{ID: "call_1", Type: "function", Index: 0, Function: core.FunctionCall{Name: "fn1", Arguments: "{}"}},
+			{ID: "call_2", Type: "function", Index: 1, Function: core.FunctionCall{Name: "fn2", Arguments: `{"x":1}`}},
+		}},
+	}
+
+	result := buildOpenAIMessages(msgs)
+	if len(result[0].ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(result[0].ToolCalls))
+	}
+	if result[0].ToolCalls[0].Function.Name != "fn1" {
+		t.Fatalf("expected fn1, got %s", result[0].ToolCalls[0].Function.Name)
+	}
+	if result[0].ToolCalls[1].Function.Name != "fn2" {
+		t.Fatalf("expected fn2, got %s", result[0].ToolCalls[1].Function.Name)
+	}
+	if *result[0].ToolCalls[0].Index != 0 {
+		t.Fatalf("expected Index 0, got %d", *result[0].ToolCalls[0].Index)
+	}
+	if *result[0].ToolCalls[1].Index != 1 {
+		t.Fatalf("expected Index 1, got %d", *result[0].ToolCalls[1].Index)
+	}
+}
+
+func TestBuildOpenAIMessages_EmptyMessages(t *testing.T) {
+	result := buildOpenAIMessages(nil)
+	if len(result) != 0 {
+		t.Fatalf("expected empty result for nil input, got %d", len(result))
+	}
+
+	result = buildOpenAIMessages([]core.Message{})
+	if len(result) != 0 {
+		t.Fatalf("expected empty result for empty input, got %d", len(result))
+	}
+}
+
+func TestBuildOpenAIMessages_NoToolCalls(t *testing.T) {
+	msgs := []core.Message{
+		{Role: "user", Content: "Hello"},
+	}
+	result := buildOpenAIMessages(msgs)
+	if len(result[0].ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %d", len(result[0].ToolCalls))
+	}
+}
+
+func TestBuildOpenAITools_Empty(t *testing.T) {
+	if result := buildOpenAITools(nil); result != nil {
+		t.Fatalf("expected nil for nil input, got %v", result)
+	}
+	if result := buildOpenAITools([]core.Tool{}); result != nil {
+		t.Fatalf("expected nil for empty input, got %v", result)
+	}
+}
+
+func TestBuildOpenAITools_NilFunction(t *testing.T) {
+	tools := []core.Tool{
+		{Type: "function", Function: nil},
+	}
+	result := buildOpenAITools(tools)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(result))
+	}
+	if result[0].Function != nil {
+		t.Fatal("expected nil Function in output")
+	}
+}
+
+func TestBuildOpenAIToolChoice_UnknownType(t *testing.T) {
+	// Non-string, non-ToolChoice value should pass through.
+	v := buildOpenAIToolChoice(42)
+	if v != 42 {
+		t.Fatalf("expected 42, got %v", v)
+	}
+}
+
+func TestBuildCoreChoice_BasicMessage(t *testing.T) {
+	choice := openai.ChatCompletionChoice{
+		Index: 0,
+		Message: openai.ChatCompletionMessage{
+			Role:    "assistant",
+			Content: "Hello",
+		},
+		FinishReason: "stop",
+	}
+
+	result := buildCoreChoice(choice)
+	if result.Index != 0 {
+		t.Fatalf("expected index 0, got %d", result.Index)
+	}
+	if result.Message.Role != "assistant" {
+		t.Fatalf("expected role 'assistant', got '%s'", result.Message.Role)
+	}
+	if result.Message.Content != "Hello" {
+		t.Fatalf("expected content 'Hello', got '%s'", result.Message.Content)
+	}
+	if result.FinishReason != "stop" {
+		t.Fatalf("expected finish reason 'stop', got '%s'", result.FinishReason)
+	}
+}
+
+func TestBuildCoreChoice_WithToolCalls(t *testing.T) {
+	idx0 := 0
+	idx1 := 1
+	choice := openai.ChatCompletionChoice{
+		Index: 1,
+		Message: openai.ChatCompletionMessage{
+			Role:       "assistant",
+			ToolCallID: "tc_1",
+			ToolCalls: []openai.ToolCall{
+				{ID: "call_1", Type: "function", Index: &idx0, Function: openai.FunctionCall{Name: "fn1", Arguments: "{}"}},
+				{ID: "call_2", Type: "function", Index: &idx1, Function: openai.FunctionCall{Name: "fn2", Arguments: `{"x":1}`}},
+			},
+		},
+		FinishReason: "tool_calls",
+	}
+
+	result := buildCoreChoice(choice)
+	if result.Message.ToolCallID != "tc_1" {
+		t.Fatalf("expected ToolCallID 'tc_1', got '%s'", result.Message.ToolCallID)
+	}
+	if len(result.Message.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(result.Message.ToolCalls))
+	}
+	if result.Message.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("expected call_1, got %s", result.Message.ToolCalls[0].ID)
+	}
+	if result.Message.ToolCalls[0].Index != 0 {
+		t.Fatalf("expected Index 0, got %d", result.Message.ToolCalls[0].Index)
+	}
+	if result.Message.ToolCalls[1].Index != 1 {
+		t.Fatalf("expected Index 1, got %d", result.Message.ToolCalls[1].Index)
+	}
+	if result.FinishReason != "tool_calls" {
+		t.Fatalf("expected finish reason 'tool_calls', got '%s'", result.FinishReason)
+	}
+}
+
+func TestBuildCoreChoice_NilToolCallIndex(t *testing.T) {
+	choice := openai.ChatCompletionChoice{
+		Index: 0,
+		Message: openai.ChatCompletionMessage{
+			Role: "assistant",
+			ToolCalls: []openai.ToolCall{
+				{ID: "call_1", Type: "function", Index: nil, Function: openai.FunctionCall{Name: "fn1"}},
+			},
+		},
+	}
+
+	result := buildCoreChoice(choice)
+	if len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result.Message.ToolCalls))
+	}
+	// Index should be zero value when nil.
+	if result.Message.ToolCalls[0].Index != 0 {
+		t.Fatalf("expected Index 0 for nil pointer, got %d", result.Message.ToolCalls[0].Index)
+	}
+}
+
+func TestIsTemperatureError_CaseInsensitive(t *testing.T) {
+	if !isTemperatureError(errors.New("TEMPERATURE must be 1")) {
+		t.Fatal("should match uppercase TEMPERATURE")
+	}
+	if !isTemperatureError(errors.New("Invalid Temperature Value")) {
+		t.Fatal("should match mixed case")
+	}
+}
+
+func TestOpenAIProvider_ChatCompleteStream_NotSupported(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test"})
+	// BaseProvider.ChatCompleteStream returns "not supported" error.
+	_, err := bp.ChatCompleteStream(context.Background(), core.ChatCompletionRequest{})
+	if err == nil {
+		t.Fatal("expected error for unsupported streaming")
+	}
+	if !strings.Contains(err.Error(), "does not support streaming") {
+		t.Fatalf("expected 'does not support streaming' error, got: %v", err)
+	}
+}
+
+func TestOpenAIProvider_ListModels_ConfigIncomplete(t *testing.T) {
+	// No APIKey, default endpoint is set. ListModels should fail.
+	p := NewOpenAIProvider(core.ProviderConfig{Name: "test"})
+	_, err := p.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error for incomplete config")
+	}
+}
+
+func TestBaseProvider_ListModels_ConfigIncomplete(t *testing.T) {
+	bp := NewBaseProvider(core.ProviderConfig{Name: "test"})
+	_, err := bp.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error for incomplete config")
+	}
+	if !strings.Contains(err.Error(), "config incomplete") {
+		t.Fatalf("expected 'config incomplete' error, got: %v", err)
+	}
+}
+
+// newMockHTTPServer creates a test HTTP server that responds with the given status and body.
+func newMockHTTPServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	return srv
+}
+
+func TestBaseProvider_HealthCheck_ContextCanceled(t *testing.T) {
+	// Use a server that blocks until context is canceled.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	bp := NewBaseProvider(core.ProviderConfig{
+		Name:       "test",
+		APIKey:     "test-key",
+		Endpoint:   srv.URL,
+		Model:      "m",
+		HTTPClient: srv.Client(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	err := bp.HealthCheck(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
 	}
 }

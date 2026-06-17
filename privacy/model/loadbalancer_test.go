@@ -342,6 +342,143 @@ func TestLoadBalancedClient_StatsLatency(t *testing.T) {
 	}
 }
 
+func TestWithHCInterval(t *testing.T) {
+	lb := NewLoadBalancedClientWithOptions("http://localhost:8080", RoundRobin, nil, []LoadBalancedClientOption{
+		WithHCInterval(30 * time.Second),
+		WithAutoHealthCheck(false),
+	})
+	defer lb.Close()
+	if lb.hcInterval != 30*time.Second {
+		t.Fatalf("expected hcInterval 30s, got %v", lb.hcInterval)
+	}
+}
+
+func TestLoadBalancedClient_HealthCheck(t *testing.T) {
+	// Create a mock health endpoint.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	lb := NewLoadBalancedClientWithOptions(srv.URL, RoundRobin, nil, []LoadBalancedClientOption{
+		WithAutoHealthCheck(false),
+	})
+	defer lb.Close()
+
+	// Initially all backends are healthy.
+	ok, err := lb.HealthCheck(context.Background())
+	if err != nil {
+		t.Fatalf("HealthCheck error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected at least one healthy backend")
+	}
+
+	// Mark backend as unhealthy.
+	lb.backends[0].healthy.Store(false)
+	ok, err = lb.HealthCheck(context.Background())
+	if err != nil {
+		t.Fatalf("HealthCheck error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected no healthy backends")
+	}
+}
+
+func TestLoadBalancedClient_EmptyEndpoints(t *testing.T) {
+	lb := NewLoadBalancedClientWithOptions("", RoundRobin, nil, []LoadBalancedClientOption{
+		WithAutoHealthCheck(false),
+	})
+	// Don't call Close - empty client has nil stopHC channel.
+	if len(lb.backends) != 0 {
+		t.Fatalf("expected 0 backends, got %d", len(lb.backends))
+	}
+	// pickOrder should return nil for empty backends.
+	order := lb.pickOrder()
+	if order != nil {
+		t.Fatalf("expected nil order, got %v", order)
+	}
+	// HealthCheck should return false.
+	ok, _ := lb.HealthCheck(context.Background())
+	if ok {
+		t.Fatal("expected no healthy backends for empty client")
+	}
+	// Detect should fail.
+	_, err := lb.Detect(context.Background(), "test")
+	if err == nil {
+		t.Fatal("expected error for empty client")
+	}
+}
+
+func TestLoadBalancedClient_RandomStrategy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opfDetectHandler(w, r, "NAME", "test")
+	}))
+	defer srv.Close()
+
+	lb := NewLoadBalancedClientWithOptions(srv.URL+","+srv.URL, Random, nil, []LoadBalancedClientOption{
+		WithAutoHealthCheck(false),
+	})
+	defer lb.Close()
+
+	order := lb.pickOrder()
+	if len(order) != 2 {
+		t.Fatalf("expected 2 backends, got %d", len(order))
+	}
+}
+
+func TestLoadBalancedClient_LeastLatencyStrategy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opfDetectHandler(w, r, "NAME", "test")
+	}))
+	defer srv.Close()
+
+	lb := NewLoadBalancedClientWithOptions(srv.URL+","+srv.URL, LeastLatency, nil, []LoadBalancedClientOption{
+		WithAutoHealthCheck(false),
+	})
+	defer lb.Close()
+
+	// Set different latencies.
+	lb.backends[0].latencyNs.Store(int64(200 * time.Millisecond))
+	lb.backends[1].latencyNs.Store(int64(50 * time.Millisecond))
+
+	order := lb.pickOrder()
+	if len(order) != 2 {
+		t.Fatalf("expected 2 backends, got %d", len(order))
+	}
+	// Least latency backend should be first.
+	if order[0].latencyNs.Load() > order[1].latencyNs.Load() {
+		t.Fatal("expected least latency backend first")
+	}
+}
+
+func TestLoadBalancedClient_LeastLatency_AllUnhealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opfDetectHandler(w, r, "NAME", "test")
+	}))
+	defer srv.Close()
+
+	lb := NewLoadBalancedClientWithOptions(srv.URL+","+srv.URL, LeastLatency, nil, []LoadBalancedClientOption{
+		WithAutoHealthCheck(false),
+	})
+	defer lb.Close()
+
+	// Mark all as unhealthy.
+	for _, b := range lb.backends {
+		b.healthy.Store(false)
+	}
+
+	// When all unhealthy, pickOrder returns all backends as fallback.
+	order := lb.pickOrder()
+	if len(order) != 2 {
+		t.Fatalf("expected 2 backends fallback, got %d", len(order))
+	}
+}
+
 func TestSplitEndpoints(t *testing.T) {
 	tests := []struct {
 		input string

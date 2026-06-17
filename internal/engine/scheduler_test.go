@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -774,5 +775,419 @@ func TestScheduler_SetHealthCheckInterval(t *testing.T) {
 	s.SetHealthCheckInterval(0)
 	if s.HealthCheckInterval() != 0 {
 		t.Fatalf("expected 0 after disable, got %v", s.HealthCheckInterval())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ChatCompleteWithRouter tests
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ChatCompleteWithRouter(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p1-resp"}}},
+	}}
+	p2 := &mockProv{name: "p2", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m2"}, response: &core.ChatCompletionResponse{
+		Choices: []core.Choice{{Message: core.Message{Content: "p2-resp"}}},
+	}}
+	s := NewScheduler(p1, p2)
+
+	// Use SingleProviderRouter to force p2
+	router := &core.SingleProviderRouter{Name: "p2"}
+	resp, err := s.ChatCompleteWithRouter(context.Background(), router, core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Content() != "p2-resp" {
+		t.Fatalf("expected p2 response, got %s", resp.Content())
+	}
+}
+
+func TestScheduler_ChatCompleteWithRouter_Closed(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+	s.Close()
+
+	router := &core.PrimaryRouter{}
+	_, err := s.ChatCompleteWithRouter(context.Background(), router, core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if !errors.Is(err, ErrSchedulerClosed) {
+		t.Fatalf("expected ErrSchedulerClosed, got %v", err)
+	}
+}
+
+func TestScheduler_ChatCompleteWithRouter_NoAvailable(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: false, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	router := &core.PrimaryRouter{}
+	_, err := s.ChatCompleteWithRouter(context.Background(), router, core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if !errors.Is(err, ErrNoAvailableProvider) {
+		t.Fatalf("expected ErrNoAvailableProvider, got %v", err)
+	}
+}
+
+func TestScheduler_ChatCompleteWithRouter_InterceptorBlock(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+
+	ic := core.Interceptor{
+		BeforeRequest: func(ctx context.Context, req *core.ChatCompletionRequest) error {
+			return errors.New("blocked by interceptor")
+		},
+	}
+
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithInterceptors(ic))
+	router := &core.PrimaryRouter{}
+	_, err := s.ChatCompleteWithRouter(context.Background(), router, core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil || err.Error() != "blocked by interceptor" {
+		t.Fatalf("expected interceptor error, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ProviderByName tests
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ProviderByName_Found(t *testing.T) {
+	p1 := &mockProv{name: "alpha", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	p2 := &mockProv{name: "beta", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1, p2)
+
+	found := s.ProviderByName("beta")
+	if found == nil {
+		t.Fatal("expected to find provider 'beta'")
+	}
+	if found.Name() != "beta" {
+		t.Fatalf("expected beta, got %s", found.Name())
+	}
+}
+
+func TestScheduler_ProviderByName_NotFound(t *testing.T) {
+	p1 := &mockProv{name: "alpha", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	found := s.ProviderByName("nonexistent")
+	if found != nil {
+		t.Fatal("expected nil for nonexistent provider")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProvider edge cases
+// ---------------------------------------------------------------------------
+
+func TestScheduler_TestProvider_Unavailable(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: false, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	err := s.TestProvider(context.Background(), "p1")
+	if err == nil {
+		t.Fatal("expected error for unavailable provider")
+	}
+	if !strings.Contains(err.Error(), "config incomplete") {
+		t.Fatalf("expected 'config incomplete' error, got: %v", err)
+	}
+}
+
+func TestScheduler_TestProvider_PanicRecovery(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}, panicOnCall: true}
+	s := NewScheduler(p1)
+
+	err := s.TestProvider(context.Background(), "p1")
+	if err == nil {
+		t.Fatal("expected error from panicking provider")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("expected panic error, got: %v", err)
+	}
+}
+
+func TestScheduler_TestProvider_Success(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+	s := NewScheduler(p1)
+
+	err := s.TestProvider(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetTimeout edge cases
+// ---------------------------------------------------------------------------
+
+func TestScheduler_SetTimeout_ZeroIgnored(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	original := s.timeout.Load()
+	s.SetTimeout(0) // should be ignored
+	if s.timeout.Load() != original {
+		t.Fatal("SetTimeout(0) should not change timeout")
+	}
+
+	s.SetTimeout(-1 * time.Second) // should be ignored
+	if s.timeout.Load() != original {
+		t.Fatal("SetTimeout(-1s) should not change timeout")
+	}
+}
+
+func TestScheduler_SetTimeout_Valid(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	s.SetTimeout(30 * time.Second)
+	if time.Duration(s.timeout.Load()) != 30*time.Second {
+		t.Fatalf("expected 30s timeout, got %v", time.Duration(s.timeout.Load()))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IsClosed
+// ---------------------------------------------------------------------------
+
+func TestScheduler_IsClosed(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	if s.IsClosed() {
+		t.Fatal("expected not closed initially")
+	}
+	s.Close()
+	if !s.IsClosed() {
+		t.Fatal("expected closed after Close()")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// History getter
+// ---------------------------------------------------------------------------
+
+func TestScheduler_History_Nil(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	if s.History() != nil {
+		t.Fatal("expected nil history when not configured")
+	}
+}
+
+func TestScheduler_History_WithHistory(t *testing.T) {
+	h := NewHistory(10)
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithHistory(h))
+
+	if s.History() != h {
+		t.Fatal("expected history to match")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PromptInjector getter
+// ---------------------------------------------------------------------------
+
+func TestScheduler_PromptInjector_Nil(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	if s.PromptInjector() != nil {
+		t.Fatal("expected nil PromptInjector when not configured")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router getter
+// ---------------------------------------------------------------------------
+
+func TestScheduler_Router_Nil(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	if s.Router() != nil {
+		t.Fatal("expected nil router when not configured")
+	}
+}
+
+func TestScheduler_Router_AfterSet(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	rr := &core.RoundRobinRouter{}
+	s.SetRouter(rr)
+
+	got := s.Router()
+	if got == nil {
+		t.Fatal("expected non-nil router after SetRouter")
+	}
+}
+
+func TestScheduler_SetRouter_Nil(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	rr := &core.RoundRobinRouter{}
+	s.SetRouter(rr)
+	s.SetRouter(nil)
+
+	if s.Router() != nil {
+		t.Fatal("expected nil router after SetRouter(nil)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Interceptors getter
+// ---------------------------------------------------------------------------
+
+func TestScheduler_Interceptors_Nil(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	if s.Interceptors() != nil {
+		t.Fatal("expected nil interceptors when not configured")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ClearSystemPrompt smoke test
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ClearSystemPrompt(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewScheduler(p1)
+
+	s.SetSystemPrompt("test prompt")
+	s.ClearSystemPrompt()
+	// Smoke test: no panic
+}
+
+// ---------------------------------------------------------------------------
+// Acquire / Release
+// ---------------------------------------------------------------------------
+
+func TestScheduler_AcquireRelease(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 2}}
+	s := NewScheduler(p1)
+
+	if err := s.Acquire(); err != nil {
+		t.Fatalf("unexpected acquire error: %v", err)
+	}
+	s.Release()
+}
+
+// ---------------------------------------------------------------------------
+// ChatComplete with history recording
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ChatComplete_WithHistory(t *testing.T) {
+	h := NewHistory(10)
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithHistory(h))
+
+	_, err := s.ChatComplete(context.Background(), core.ChatCompletionRequest{
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+		Tags:     []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	records := h.Records()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(records))
+	}
+	if records[0].Provider != "p1" {
+		t.Fatalf("expected provider p1, got %s", records[0].Provider)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewSchedulerWithOptions multiple options
+// ---------------------------------------------------------------------------
+
+func TestScheduler_WithOptions_Timeout(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithTimeout(10*time.Second))
+
+	if time.Duration(s.timeout.Load()) != 10*time.Second {
+		t.Fatalf("expected 10s timeout, got %v", time.Duration(s.timeout.Load()))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ProviderStatus
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ProviderStatus_Empty(t *testing.T) {
+	s := NewScheduler()
+	status := s.ProviderStatus()
+	if len(status) != 0 {
+		t.Fatalf("expected empty status, got %d", len(status))
+	}
+}
+
+func TestScheduler_ProviderStatus_WithProviders(t *testing.T) {
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1, Model: "m1"}}
+	s := NewScheduler(p1)
+
+	status := s.ProviderStatus()
+	if len(status) != 1 {
+		t.Fatalf("expected 1 status, got %d", len(status))
+	}
+	if status[0].Name != "p1" {
+		t.Fatalf("expected p1, got %s", status[0].Name)
+	}
+	if !status[0].Available {
+		t.Fatal("expected available")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ListModelsWithConfig
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ListModelsWithConfig(t *testing.T) {
+	s := NewScheduler()
+	// ListModelsWithConfig creates a real provider and calls its API,
+	// so we just verify it doesn't panic and handles errors gracefully.
+	_, _ = s.ListModelsWithConfig(context.Background(), core.ProviderConfig{
+		Name: "deepseek", APIKey: "invalid-key", Endpoint: "https://api.deepseek.com", Model: "m",
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Close with history
+// ---------------------------------------------------------------------------
+
+func TestScheduler_Close_WithHistory(t *testing.T) {
+	h := NewHistory(10)
+	p1 := &mockProv{name: "p1", available: true, config: core.ProviderConfig{MaxConcurrent: 1}}
+	s := NewSchedulerWithOptions([]providers.Provider{p1}, WithHistory(h))
+
+	err := s.Close()
+	if err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ApplyConfig with no providers
+// ---------------------------------------------------------------------------
+
+func TestScheduler_ApplyConfig_Empty(t *testing.T) {
+	s := NewScheduler()
+	err := s.ApplyConfig(core.Config{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	status := s.ProviderStatus()
+	if len(status) != 0 {
+		t.Fatalf("expected 0 providers, got %d", len(status))
 	}
 }

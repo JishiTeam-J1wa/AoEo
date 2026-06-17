@@ -73,6 +73,36 @@ func TestToLower(t *testing.T) {
 	}
 }
 
+func TestDefaultRetryConfig(t *testing.T) {
+	cfg := DefaultRetryConfig()
+	if cfg.MaxRetries != 2 {
+		t.Fatalf("expected MaxRetries 2, got %d", cfg.MaxRetries)
+	}
+	if cfg.BaseDelay != 500*time.Millisecond {
+		t.Fatalf("expected BaseDelay 500ms, got %v", cfg.BaseDelay)
+	}
+	if cfg.MaxDelay != 5*time.Second {
+		t.Fatalf("expected MaxDelay 5s, got %v", cfg.MaxDelay)
+	}
+	if cfg.Multiplier != 2.0 {
+		t.Fatalf("expected Multiplier 2.0, got %f", cfg.Multiplier)
+	}
+	if cfg.Retryable == nil {
+		t.Fatal("expected non-nil Retryable function")
+	}
+	// Verify the default Retryable function works.
+	if !cfg.Retryable(errors.New("timeout")) {
+		t.Fatal("expected timeout to be retryable")
+	}
+	if cfg.Retryable(errors.New("invalid key")) {
+		t.Fatal("expected 'invalid key' to not be retryable")
+	}
+	// Validate default config should pass.
+	if issues := cfg.Validate(); len(issues) != 0 {
+		t.Fatalf("default config should be valid, got issues: %v", issues)
+	}
+}
+
 func TestRetryConfig_Validate(t *testing.T) {
 	tests := []struct {
 		name       string

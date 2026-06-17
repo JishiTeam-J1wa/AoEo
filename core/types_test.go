@@ -176,3 +176,230 @@ func TestChatCompletionRequest_Clone_WithTools(t *testing.T) {
 		t.Fatal("Clone did not deep-copy Tools")
 	}
 }
+
+// ========== Additional tests for coverage ==========
+
+func TestChatCompletionRequest_Clone_Metadata(t *testing.T) {
+	original := ChatCompletionRequest{
+		Model:    "gpt-4",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Metadata: map[string]any{"key": "value", "count": 42},
+	}
+
+	cloned := original.Clone()
+
+	// Verify Metadata was copied
+	if cloned.Metadata["key"] != "value" {
+		t.Fatal("Metadata not copied")
+	}
+
+	// Mutate clone; original should be unaffected
+	cloned.Metadata["key"] = "modified"
+	cloned.Metadata["new_key"] = "new_value"
+	if original.Metadata["key"] != "value" {
+		t.Fatal("Clone mutated original Metadata")
+	}
+	if _, ok := original.Metadata["new_key"]; ok {
+		t.Fatal("Clone added key to original Metadata")
+	}
+}
+
+func TestChatCompletionRequest_Clone_Stop(t *testing.T) {
+	original := ChatCompletionRequest{
+		Model:    "gpt-4",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Stop:     []string{"STOP", "END"},
+	}
+
+	cloned := original.Clone()
+
+	// Verify Stop was deep copied
+	if len(cloned.Stop) != 2 || cloned.Stop[0] != "STOP" {
+		t.Fatal("Stop not copied correctly")
+	}
+
+	// Mutate clone; original should be unaffected
+	cloned.Stop[0] = "modified"
+	if original.Stop[0] != "STOP" {
+		t.Fatal("Clone mutated original Stop")
+	}
+}
+
+func TestChatCompletionRequest_Clone_FunctionPointerIndependence(t *testing.T) {
+	original := ChatCompletionRequest{
+		Tools: []Tool{
+			{Type: "function", Function: &FunctionDefinition{Name: "f1", Description: "original"}},
+		},
+	}
+
+	cloned := original.Clone()
+
+	// Mutate the Function through the original
+	original.Tools[0].Function.Name = "modified"
+	original.Tools[0].Function.Description = "changed"
+
+	// Cloned Function should be independent
+	if cloned.Tools[0].Function.Name != "f1" {
+		t.Fatalf("Clone Function Name should be 'f1', got %s", cloned.Tools[0].Function.Name)
+	}
+	if cloned.Tools[0].Function.Description != "original" {
+		t.Fatalf("Clone Function Description should be 'original', got %s", cloned.Tools[0].Function.Description)
+	}
+}
+
+func TestChatCompletionRequest_Clone_NilFunctionPointer(t *testing.T) {
+	original := ChatCompletionRequest{
+		Tools: []Tool{
+			{Type: "function", Function: nil},
+		},
+	}
+
+	cloned := original.Clone()
+	if cloned.Tools[0].Function != nil {
+		t.Fatal("nil Function pointer should remain nil in clone")
+	}
+}
+
+func TestChatCompletionRequest_Validate_SystemMessageNotFirst(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+			{Role: "system", Content: "sys"},
+		},
+	}
+	issues := req.Validate()
+	found := false
+	for _, issue := range issues {
+		if issue == "message[1]: system message should be the first message" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected system message position issue, got: %v", issues)
+	}
+}
+
+func TestChatCompletionRequest_Validate_MultipleSystemMessages(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "system", Content: "sys1"},
+			{Role: "system", Content: "sys2"},
+		},
+	}
+	issues := req.Validate()
+	found := false
+	for _, issue := range issues {
+		if issue == "found 2 system messages, at most 1 is allowed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected multiple system messages issue, got: %v", issues)
+	}
+}
+
+func TestChatCompletionRequest_Validate_EmptyContent(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: ""},
+		},
+	}
+	issues := req.Validate()
+	found := false
+	for _, issue := range issues {
+		if issue == "message[0]: content is required" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected empty content issue, got: %v", issues)
+	}
+}
+
+func TestChatCompletionRequest_Validate_EmptyRole(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "", Content: "hi"},
+		},
+	}
+	issues := req.Validate()
+	found := false
+	for _, issue := range issues {
+		if issue == "message[0]: role is required" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected empty role issue, got: %v", issues)
+	}
+}
+
+func TestChatCompletionRequest_Validate_AssistantEmptyContentAllowed(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: ""},
+		},
+	}
+	issues := req.Validate()
+	for _, issue := range issues {
+		if issue == "message[1]: content is required" {
+			t.Fatal("assistant messages should be allowed to have empty content")
+		}
+	}
+}
+
+func TestChatCompletionRequest_Validate_ToolEmptyContentAllowed(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "user", Content: "hi"},
+			{Role: "tool", Content: ""},
+		},
+	}
+	issues := req.Validate()
+	for _, issue := range issues {
+		if issue == "message[1]: content is required" {
+			t.Fatal("tool messages should be allowed to have empty content")
+		}
+	}
+}
+
+func TestChatCompletionRequest_Validate_MultipleErrors(t *testing.T) {
+	req := ChatCompletionRequest{
+		Messages: []Message{
+			{Role: "", Content: ""},
+			{Role: "system", Content: "sys"},
+		},
+		Temperature: -1,
+		TopP:        2.0,
+		MaxTokens:   -5,
+	}
+	issues := req.Validate()
+	// Expected issues:
+	// 1. message[0]: role is required
+	// 2. message[0]: content is required
+	// 3. message[1]: system message should be the first message
+	// 4. found 1 system messages (not >1, so no issue for count)
+	// 5. temperature must be between 0 and 2
+	// 6. top_p must be between 0 and 1
+	// 7. max_tokens must be >= 0
+	if len(issues) < 5 {
+		t.Fatalf("expected at least 5 issues, got %d: %v", len(issues), issues)
+	}
+}
+
+func TestChatCompletionResponse_Content_MultipleChoices(t *testing.T) {
+	resp := &ChatCompletionResponse{
+		Choices: []Choice{
+			{Message: Message{Content: "first"}},
+			{Message: Message{Content: "second"}},
+		},
+	}
+	if resp.Content() != "first" {
+		t.Fatalf("expected 'first', got %s", resp.Content())
+	}
+}
