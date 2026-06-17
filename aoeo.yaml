@@ -1,0 +1,44 @@
+# AoEo Gateway Configuration
+# See docs/SERVICE_TRANSFORMATION.md for full documentation.
+
+server:
+  addr: ":8081"
+  api_key: "${AOEO_API_KEY:-sk-aoeo-dev}"
+  read_timeout: 120s
+  write_timeout: 120s
+
+providers:
+  - name: deepseek
+    api_key: "${DEEPSEEK_API_KEY}"
+    endpoint: https://api.deepseek.com
+    model: deepseek-chat
+    max_concurrent: 10
+    max_failures: 3
+    cooldown: 60s
+    pricing:
+      prompt_per_1k: 2.0
+      completion_per_1k: 8.0
+      currency: CNY
+
+  - name: kimi
+    api_key: "${KIMI_API_KEY}"
+    endpoint: https://api.moonshot.cn/v1
+    model: moonshot-v1-8k
+    max_concurrent: 5
+
+router:
+  strategy: weighted
+  weight_strategy: combined
+
+retry:
+  max_retries: 2
+  base_delay: 500ms
+  max_delay: 5s
+  multiplier: 2.0
+
+health_check:
+  interval: 30s
+
+history:
+  ring_size: 1000
+  persist: false
