@@ -485,6 +485,114 @@ client, _ := aoeo.NewClient(cfg, aoeo.WithInterceptors(gw.ToInterceptor()))
 
 ---
 
+## AoEo HTTP Gateway
+
+AoEo 既可以作为 Go SDK 嵌入业务进程，也可以作为 **独立 OpenAI 兼容网关服务**运行，让 Python / Node.js / curl 等任意客户端直接通过 HTTP 接入。
+
+### 启动服务
+
+```bash
+go run ./cmd/server --config aoeo.yaml
+```
+
+或使用构建好的二进制：
+
+```bash
+go build -o aoeo-server ./cmd/server
+./aoeo-server --config aoeo.yaml
+```
+
+### 最小配置示例
+
+```yaml
+server:
+  addr: ":8081"
+  api_key: "${AOEO_API_KEY:-sk-aoeo-dev}"
+  read_timeout: 120s
+  write_timeout: 120s
+
+providers:
+  - name: deepseek
+    api_key: "${DEEPSEEK_API_KEY}"
+    endpoint: https://api.deepseek.com
+    model: deepseek-chat
+    max_concurrent: 10
+
+  - name: kimi
+    api_key: "${KIMI_API_KEY}"
+    endpoint: https://api.moonshot.cn/v1
+    model: moonshot-v1-8k
+    max_concurrent: 5
+
+router:
+  strategy: weighted
+  weight_strategy: combined
+```
+
+> 完整配置字段与热重载说明见 [docs/SERVICE_TRANSFORMATION.md](./docs/SERVICE_TRANSFORMATION.md)。
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/v1/chat/completions` | POST | 标准 OpenAI 兼容 Chat Completion |
+| `/v1/chat/completions/stream` | POST | SSE 流式输出 |
+| `/v1/models` | GET | 列出所有可用模型 |
+| `/healthz` | GET | Kubernetes liveness 探针 |
+| `/readyz` | GET | Kubernetes readiness 探针 |
+| `/metrics` | GET | Prometheus 指标 |
+| `/admin/stats` | GET | Provider 调用统计 |
+| `/admin/health` | GET | Provider 健康状态 |
+| `/admin/config/reload` | POST | 热重载 YAML 配置 |
+
+### 用 curl 调用
+
+```bash
+curl http://localhost:8081/v1/chat/completions \
+  -H "Authorization: Bearer sk-aoeo-dev" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "Hello, AoEo!"}]
+  }'
+```
+
+### 用 OpenAI Python SDK 调用
+
+业务方只需修改 `base_url` 和 `api_key`，其余代码完全不变：
+
+```python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8081/v1",
+    api_key="sk-aoeo-dev",
+)
+
+response = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[{"role": "user", "content": "Hello, AoEo!"}],
+)
+print(response.choices[0].message.content)
+```
+
+### 与 SDK 的关系
+
+```
+┌─────────────────────────────────────────────┐
+│          AoEo HTTP Gateway Service          │
+│  ┌───────────────────────────────────────┐  │
+│  │  server/ (OpenAI 兼容 HTTP API)        │  │
+│  └───────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────┐  │
+│  │  Client → Scheduler → Providers → AI  │  │
+│  │  (现有 SDK 核心, 完全复用)              │  │
+│  └───────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
+```
+
+---
+
 ## Docker Deployment
 
 ### Cluster Mode (3x OPF instances)
@@ -545,6 +653,7 @@ AoEo/
 ├── client.go              # SDK 入口, Client facade + 47 type aliases
 ├── options.go             # Functional request builder (13 options)
 ├── go.mod                 # Go 1.25, 5 direct deps
+├── aoeo.yaml              # 独立网关服务示例配置 (YAML)
 │
 ├── core/                  # 公共类型与接口 (9 files, ~900 lines)
 │   ├── types.go           # Request, Response, Message, Choice, Usage, DualResult
@@ -593,9 +702,30 @@ AoEo/
 │   ├── mysql.go           # MySQL
 │   └── postgres.go        # PostgreSQL
 │
+├── server/                # OpenAI 兼容 HTTP 网关服务
+│   ├── server.go          # HTTP Server 生命周期、路由注册、优雅关闭
+│   ├── handler_chat.go    # POST /v1/chat/completions
+│   ├── handler_stream.go  # POST /v1/chat/completions/stream (SSE)
+│   ├── handler_models.go  # GET /v1/models
+│   ├── handler_admin.go   # /admin/* 管理端点
+│   ├── handler_health.go  # /healthz /readyz K8s 探针
+│   ├── handler_metrics.go # /metrics Prometheus 指标
+│   ├── middleware.go      # 鉴权、日志、请求 ID、CORS
+│   ├── converter.go       # OpenAI JSON ↔ core 类型转换
+│   └── server_test.go     # Handler 集成测试
+│
+├── config/                # 网关 YAML 配置管理
+│   ├── config.go          # YAML 解析、默认值、校验、环境变量替换
+│   ├── watcher.go         # 配置文件变更监听与热重载
+│   └── config_test.go     # 配置解析测试
+│
+├── observability/         # 可观测性扩展 (预留, Phase 3 落地)
+│
 ├── cmd/
 │   ├── aoeo/              # CLI tool
 │   │   └── main.go        # list-models / test / status / chat / stream / privacy
+│   ├── server/            # 独立 HTTP 网关服务入口
+│   │   └── main.go        # go run ./cmd/server --config aoeo.yaml
 │   └── privacy-sidecar/   # OPF proxy sidecar
 │       ├── main.py        # FastAPI + httpx (OPF /redact proxy)
 │       ├── Dockerfile     # python:3.12-slim (~50MB)
@@ -607,7 +737,8 @@ AoEo/
 │   │   ├── aoeo_privacy_module.html     # Privacy module detailed blueprint
 │   │   └── aoeo_request_lifecycle.html  # Request scheduling & data flow
 │   ├── DEEP_AUDIT_REPORT.md             # 7-dimension deep audit report
-│   └── COMMENT_AUDIT_REPORT.md          # Comment normalization audit
+│   ├── COMMENT_AUDIT_REPORT.md          # Comment normalization audit
+│   └── SERVICE_TRANSFORMATION.md        # 从 SDK 到独立网关的服务化改造方案
 │
 ├── examples/              # Usage examples
 │   ├── basic/
@@ -624,6 +755,7 @@ AoEo/
 ├── Dockerfile             # Go gateway container (static binary)
 ├── DESIGN.md              # Architecture design document
 ├── PRIVACY_GATEWAY.md     # Privacy Gateway usage guide
+├── INTEGRATION.md         # 业务集成指南
 └── LICENSE                # MIT License
 ```
 
@@ -642,6 +774,19 @@ AoEo/
 ---
 
 ## Changelog
+
+### v1.5.0 — 服务化改造 Phase 1+2 (2026-06-17)
+
+AoEo 从纯 SDK 演进为**可同时作为独立 OpenAI 兼容网关服务**运行，任意语言客户端均可通过 HTTP 接入。
+
+| 模块 | 新增内容 |
+|------|----------|
+| `cmd/server/` | 新增独立网关服务入口 `main.go`，支持 `--config` 指定 YAML 配置 |
+| `server/` | 新增 10 个文件，提供 `/v1/chat/completions`、SSE 流式、`/v1/models`、K8s 探针、`/metrics`、Admin API |
+| `config/` | 新增 YAML 配置解析、环境变量替换、默认值、校验与热重载监听 |
+| `aoeo.yaml` | 新增网关服务示例配置 |
+| `docs/SERVICE_TRANSFORMATION.md` | 新增从 SDK 到独立网关的完整改造方案 |
+| 测试 | 新增 `server/server_test.go`、`config/config_test.go`；整体覆盖率 71.7% → **79.2%** |
 
 ### v1.4.0 — LOW 级问题全面修复 (2026-06-15)
 
@@ -796,7 +941,7 @@ AoEo/
 - [x] Streaming architecture refactor
 - [x] Stream interceptor support
 - [x] Goroutine leak fix (buffered channel + safe select)
-- [x] Test coverage: 66.6% → 71.7%
+- [x] Test coverage: 66.6% → 79.2%
 
 ### Phase 4 — Ecosystem (Done)
 - [x] Weighted router (latency / success rate / combined)
@@ -820,12 +965,20 @@ AoEo/
 - [x] All comments unified to Chinese (technical terms preserved)
 - [x] `go build` + `go vet` + `go test -race` full verification
 
+### Phase 5.6 — Service Transformation (Done)
+- [x] Standalone HTTP gateway (`cmd/server` + `server/`)
+- [x] OpenAI-compatible `/v1/chat/completions` & `/v1/models` endpoints
+- [x] YAML configuration + hot-reload (`config/` + `aoeo.yaml`)
+- [x] K8s `/healthz` / `/readyz` probes
+- [x] Basic Prometheus `/metrics` endpoint
+- [x] Admin API (`/admin/stats`, `/admin/health`, `/admin/config/reload`)
+
 ### Phase 6 — Future Directions
 - [ ] Weighted router: cost-based / custom scoring functions
 - [ ] Provider plugin mechanism: dynamic external provider loading
 - [ ] Distributed scheduling: multi-node state sync
-- [ ] Prometheus metrics exporter
-- [ ] OpenTelemetry tracing integration
+- [ ] Full observability package: Prometheus collector + OpenTelemetry tracing
+- [ ] Web management dashboard
 
 ---
 
@@ -835,7 +988,8 @@ AoEo/
 |---|---|
 | [DESIGN.md](./DESIGN.md) | 架构设计文档 |
 | [PRIVACY_GATEWAY.md](./PRIVACY_GATEWAY.md) | 隐私网关完整使用手册 |
-| [INTEGRATION.md](./INTEGRATION.md) | 集成指南 |
+| [INTEGRATION.md](./INTEGRATION.md) | 业务集成指南 |
+| [SERVICE_TRANSFORMATION.md](./docs/SERVICE_TRANSFORMATION.md) | SDK → 独立网关服务化改造方案 |
 | [DEEP_AUDIT_REPORT.md](./docs/DEEP_AUDIT_REPORT.md) | 功能实现深度审计报告（7 维度 · 39 文件） |
 | [COMMENT_AUDIT_REPORT.md](./docs/COMMENT_AUDIT_REPORT.md) | 注释体系规范化整改报告 |
 | [Architecture Blueprint](./docs/diagrams/aoeo_architecture.html) | 6 层系统全局架构图 |
